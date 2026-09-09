@@ -274,3 +274,147 @@ def preprocess_image(bgr: np.ndarray, gamma="auto", gamma_value: float | None = 
     }
     return {"processed": processed, "enhanced_gray": enhanced,
             "gray": gray, "binary": binary, "info": info}
+
+# ---------------------------------------------------------------------------
+# Adaptive helpers (Levels 1 & 2). Level 3 = preprocess_image (unchanged).
+# ---------------------------------------------------------------------------
+def _safe_resize(bgr, max_side: int = MAX_SIDE, min_short: int = 900):
+    """Downscale huge scans; gently upscale tiny ones. Preserves aspect ratio."""
+    h, w = bgr.shape[:2]
+    long_side = max(h, w)
+    short_side = min(h, w)
+    scale = 1.0
+    if long_side > max_side:
+        scale = max_side / long_side
+    elif short_side < min_short:
+        # only upscale small phone photos, never above 1.75x
+        scale = min(1.75, min_short / max(short_side, 1))
+    if abs(scale - 1.0) < 1e-3:
+        return bgr, 1.0
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    return cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=interp), scale
+
+
+def preprocess_minimal(bgr: np.ndarray, stamp_mask: np.ndarray | None = None) -> dict:
+    """Level 1: resize + grayscale + (optional) stamp inpaint + tiny deskew.
+    No CLAHE, no denoise, no binarization, no de-rule.
+    """
+    t0 = time.perf_counter()
+    steps = []
+    bgr, scale = _safe_resize(bgr)
+    if abs(scale - 1.0) > 1e-3:
+        steps.append({"name": "Resize", "detail": f"scale x{scale:.2f}"})
+
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    steps.append({"name": "Grayscale", "detail": "single-channel luminance"})
+
+    if stamp_mask is not None and getattr(stamp_mask, "size", 0) > 0:
+        m = stamp_mask
+        if m.shape[:2] != gray.shape[:2]:
+            m = cv2.resize(m, (gray.shape[1], gray.shape[0]),
+                           interpolation=cv2.INTER_NEAREST)
+        if cv2.countNonZero(m) > 0:
+            gray = cv2.inpaint(gray, m, 3, cv2.INPAINT_TELEA)
+            steps.append({"name": "Stamp Inpaint", "detail": "softened seal ink"})
+
+    # very light deskew only
+    angle = 0.0
+    small = gray if max(gray.shape) <= 1200 else cv2.resize(
+        gray, None, fx=1200 / max(gray.shape), fy=1200 / max(gray.shape),
+        interpolation=cv2.INTER_AREA)
+    _, binv = cv2.threshold(small, 0, 255,
+                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    angle = _estimate_skew(binv)
+    if abs(angle) > 0.25:
+        gray = _rotate(gray, angle)
+        steps.append({"name": "Deskew", "detail": f"{angle:+.2f} deg"})
+
+    processed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    info = {
+        "level": "minimal",
+        "gamma_mode": "off", "gamma_used": 1.0,
+        "skew_angle": round(angle, 2),
+        "input_size": [bgr.shape[1], bgr.shape[0]],
+        "output_size": [processed.shape[1], processed.shape[0]],
+        "mean_brightness_before": round(float(gray.mean()), 1),
+        "mean_brightness_after": round(float(gray.mean()), 1),
+        "steps": steps,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+    }
+    return {"processed": processed, "enhanced_gray": gray,
+            "gray": gray, "binary": gray, "info": info}
+
+
+def preprocess_moderate(bgr: np.ndarray, stamp_mask: np.ndarray | None = None,
+                        gamma: str = "auto",
+                        gamma_value: float | None = None) -> dict:
+    """Level 2: resize + grayscale + stamp inpaint + auto gamma + CLAHE
+    + light denoise + deskew. NO binarization / despeckle / de-rule --
+    keeps Indic diacritics; ideal input for Bhashini.
+    """
+    t0 = time.perf_counter()
+    steps = []
+    bgr, scale = _safe_resize(bgr)
+    if abs(scale - 1.0) > 1e-3:
+        steps.append({"name": "Resize", "detail": f"scale x{scale:.2f}"})
+
+    original_brightness = float(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).mean())
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    steps.append({"name": "Grayscale", "detail": "single-channel"})
+
+    if stamp_mask is not None and getattr(stamp_mask, "size", 0) > 0:
+        m = stamp_mask
+        if m.shape[:2] != gray.shape[:2]:
+            m = cv2.resize(m, (gray.shape[1], gray.shape[0]),
+                           interpolation=cv2.INTER_NEAREST)
+        if cv2.countNonZero(m) > 0:
+            gray = cv2.inpaint(gray, m, 3, cv2.INPAINT_TELEA)
+            steps.append({"name": "Stamp Inpaint", "detail": "softened seal ink"})
+
+    # gamma
+    if gamma == "auto":
+        g_used = auto_gamma_value(gray); mode = "auto"
+    elif gamma == "manual" and gamma_value:
+        g_used = float(np.clip(gamma_value, 0.3, 3.0)); mode = "manual"
+    else:
+        g_used, mode = 1.0, "off"
+    enhanced = apply_gamma(gray, g_used) if mode != "off" else gray.copy()
+    steps.append({"name": "Gamma", "detail": f"{mode} gamma={g_used:.2f}"})
+
+    # light denoise (fast median for big scans; NLMeans otherwise)
+    if enhanced.size > 3_000_000:
+        enhanced = cv2.medianBlur(enhanced, 3)
+        steps.append({"name": "Denoise", "detail": "median (large scan)"})
+    else:
+        enhanced = cv2.fastNlMeansDenoising(enhanced, None, h=5,
+                                            templateWindowSize=7,
+                                            searchWindowSize=15)
+        steps.append({"name": "Denoise", "detail": "NL-Means h=5"})
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(enhanced)
+    steps.append({"name": "CLAHE", "detail": "clip=2.0"})
+
+    # deskew on grayscale (no binarize needed for Bhashini)
+    angle = 0.0
+    _, binv = cv2.threshold(enhanced, 0, 255,
+                            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    angle = _estimate_skew(binv)
+    if abs(angle) > 0.25:
+        enhanced = _rotate(enhanced, angle)
+        steps.append({"name": "Deskew", "detail": f"{angle:+.2f} deg"})
+
+    processed = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    info = {
+        "level": "moderate",
+        "gamma_mode": mode, "gamma_used": round(g_used, 3),
+        "skew_angle": round(angle, 2),
+        "input_size": [bgr.shape[1], bgr.shape[0]],
+        "output_size": [processed.shape[1], processed.shape[0]],
+        "mean_brightness_before": round(original_brightness, 1),
+        "mean_brightness_after": round(float(enhanced.mean()), 1),
+        "steps": steps,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+    }
+    return {"processed": processed, "enhanced_gray": enhanced,
+            "gray": gray, "binary": enhanced, "info": info}

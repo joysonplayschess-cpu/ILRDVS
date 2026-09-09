@@ -21,6 +21,8 @@ CERT_TERMS = (
     "लेखपाल", "प्रमाणित", "हस्ताक्षर", "मुहर", "सत्यापित",
 )
 
+MAX_PLAUSIBLE_STAMPS = 5  # Real RoR documents rarely have more than 1-3 seals
+
 
 @dataclass
 class StampBox:
@@ -44,13 +46,10 @@ class StampReport:
     circularity: float = 0.0  # mean circularity of detected stamps (0 if none)
 
 
-def detect_stamps(image_bgr, min_ratio: float = 0.002,
-                  max_ratio: float = 0.12) -> StampReport:
-    """Detect round seals and rectangular stamps on a BGR document image.
-
-    ``min_ratio`` / ``max_ratio`` bound contour area as a fraction of the
-    page. Returns a :class:`StampReport` with boxes, a binary mask, and the
-    mean circularity of accepted detections.
+def detect_stamps(image_bgr, min_ratio: float = 0.004, max_ratio: float = 0.08) -> StampReport:
+    """
+    Conservative seal detection.
+    Prefers COLORED office ink + mid-size blobs. Never floods with text glyphs.
     """
     if image_bgr is None or getattr(image_bgr, "size", 0) == 0:
         return StampReport()
@@ -60,30 +59,29 @@ def detect_stamps(image_bgr, min_ratio: float = 0.002,
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     h, w = img.shape[:2]
     page_area = float(max(h * w, 1))
-    min_area = max(min_ratio * page_area, 25.0)
+    
+    # Raised floor: ignore tiny glyphs/noise
+    min_area = max(min_ratio * page_area, 800.0) 
     max_area = max_ratio * page_area
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    color_mask = _ink_color_mask(hsv)
-    ink_mask = _dark_ink_mask(gray)
-    combined = cv2.bitwise_or(color_mask, ink_mask)
+    # PRIMARY: colored ink only (red/blue/purple/green seals)
+    # We deliberately DO NOT include black ink here to stop table rules
+    # and text from being classified as stamps.
+    ink = _ink_color_mask(hsv)
 
-    k_round = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
-    k_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (19, 11))
-    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    closed = cv2.bitwise_or(
-        cv2.morphologyEx(combined, cv2.MORPH_CLOSE, k_round),
-        cv2.morphologyEx(combined, cv2.MORPH_CLOSE, k_rect),
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    closed = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, k)
+    closed = cv2.morphologyEx(
+        closed, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     )
-    closed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, k_open)
 
     stamp_mask = np.zeros((h, w), dtype=np.uint8)
     boxes: list[StampBox] = []
 
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in contours:
         area = float(cv2.contourArea(cnt))
         if area < min_area or area > max_area:
@@ -94,38 +92,47 @@ def detect_stamps(image_bgr, min_ratio: float = 0.002,
             circularity = float(4.0 * np.pi * area / (peri * peri))
             circularity = float(np.clip(circularity, 0.0, 1.5))
         x, y, bw, bh = cv2.boundingRect(cnt)
-        if bw < 8 or bh < 8:
+        
+        # Seals are large; skip letter-sized blobs that slipped through
+        if bw < 40 or bh < 40:
             continue
+            
         aspect = bw / float(bh)
         extent = area / float(max(bw * bh, 1))
-        approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-
-        is_round = circularity >= 0.62 and 0.65 <= aspect <= 1.45
-        is_rect = (
-            0.35 <= aspect <= 3.2
-            and extent >= 0.35
-            and (len(approx) in (4, 5, 6) or (circularity < 0.62 and extent >= 0.45))
-        )
+        
+        # Prefer round seals or dense rectangular stamps
+        is_round = circularity >= 0.55 and 0.7 <= aspect <= 1.4
+        is_rect = 0.5 <= aspect <= 2.8 and extent >= 0.40 and circularity < 0.55
         if not (is_round or is_rect):
             continue
-        # Skip page-border frames (touching most of the image edge).
-        if x <= 2 and y <= 2 and bw >= w * 0.9 and bh >= h * 0.9:
+            
+        # Skip full-page frames
+        if bw >= w * 0.85 and bh >= h * 0.85:
             continue
+            
         kind = "round" if is_round else "rect"
         boxes.append(StampBox(x=int(x), y=int(y), w=int(bw), h=int(bh),
                               circularity=circularity, kind=kind))
         cv2.drawContours(stamp_mask, [cnt], -1, 255, thickness=-1)
 
+    # Optional Hough round seals on gray (large radius only)
     for circle in _hough_seals(gray, min_area, max_area):
-        if not _overlaps_any(circle.bbox, [b.bbox for b in boxes], 0.35):
+        if circle.w >= 40 and not _overlaps_any(circle.bbox, [b.bbox for b in boxes], 0.35):
             boxes.append(circle)
             x, y, bw, bh = circle.bbox
             cv2.ellipse(stamp_mask, (x + bw // 2, y + bh // 2),
                         (bw // 2, bh // 2), 0, 0, 360, 255, -1)
 
     boxes = _nms(boxes, iou_thresh=0.4)
+
+    # CRITICAL GUARD: false-positive storm on digital forms / tables
+    # If we found 112 stamps, it's garbage. Throw it all out.
+    if len(boxes) > MAX_PLAUSIBLE_STAMPS:
+        return StampReport(boxes=[], mask=np.zeros((h, w), np.uint8), circularity=0.0)
+
     mean_c = (sum(b.circularity for b in boxes) / len(boxes)) if boxes else 0.0
-    return StampReport(boxes=boxes, mask=stamp_mask, circularity=mean_c)
+    return StampReport(boxes=boxes, mask=stamp_mask if boxes else np.zeros((h, w), np.uint8),
+                       circularity=mean_c)
 
 
 def validate_stamps(report: StampReport, word_boxes, ocr_text: str) -> list[dict]:
@@ -133,6 +140,16 @@ def validate_stamps(report: StampReport, word_boxes, ocr_text: str) -> list[dict
     issues: list[dict] = []
     boxes = list(getattr(report, "boxes", None) or [])
     words = list(word_boxes or [])
+
+    # Never emit STAMP_MULTIPLE for detector spam (already capped in detect)
+    if len(boxes) >= 3:
+        issues.append({
+            "rule_code": "STAMP_MULTIPLE",
+            "field_name": "",
+            "severity": "warning",
+            "message": f"{len(boxes)} stamps detected; confirm which seals are valid.",
+        })
+
     try:
         iou_thresh = float(getattr(settings, "STAMP_OVERLAP_TEXT_IOU", 0.15))
     except (TypeError, ValueError):
@@ -160,16 +177,16 @@ def validate_stamps(report: StampReport, word_boxes, ocr_text: str) -> list[dict
                 ),
             })
 
-    if len(boxes) >= 3:
-        issues.append({
-            "rule_code": "STAMP_MULTIPLE",
-            "field_name": "",
-            "severity": "warning",
-            "message": f"{len(boxes)} stamps detected; confirm which seals are valid.",
-        })
-
+    # Soften STAMP_MISSING: digital e-signed TN docs often have no rubber stamp
     require_cert = bool(getattr(settings, "STAMP_REQUIRE_CERT_BLOCK", True))
-    if require_cert and not boxes and not _has_cert_terms(ocr_text, words):
+    text_l = (ocr_text or "").lower()
+    digital_cues = (
+        "digitally signed", "e-services", "eservices", "reference number",
+        "2d barcode", "tamil nadu", "patta", "section 10"
+    )
+    looks_digital = any(c in text_l for c in digital_cues)
+
+    if require_cert and not boxes and not _has_cert_terms(ocr_text, words) and not looks_digital:
         issues.append({
             "rule_code": "STAMP_MISSING",
             "field_name": "",
@@ -201,16 +218,7 @@ def _ink_color_mask(hsv: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _dark_ink_mask(gray: np.ndarray) -> np.ndarray:
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, inv = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    # Drop speckle / single-glyph text; keep denser stamp ink.
-    inv = cv2.morphologyEx(inv, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-    return inv
-
-
-def _hough_seals(gray: np.ndarray, min_area: float,
-                 max_area: float) -> list[StampBox]:
+def _hough_seals(gray: np.ndarray, min_area: float, max_area: float) -> list[StampBox]:
     h, w = gray.shape[:2]
     min_r = max(8, int((min_area / np.pi) ** 0.5))
     max_r = max(min_r + 1, int((max_area / np.pi) ** 0.5))
@@ -291,11 +299,6 @@ def _iou(a, b) -> float:
 
 
 def _stamp_word_overlap(stamp_xywh, word_xywh, thresh: float) -> bool:
-    """True if classic IoU or word-coverage exceeds ``thresh``.
-
-    Word boxes are much smaller than seals, so intersection/union alone
-    often stays below 0.15 even when a word sits fully inside the stamp.
-    """
     if _iou(stamp_xywh, word_xywh) > thresh:
         return True
     sx, sy, sw, sh = stamp_xywh

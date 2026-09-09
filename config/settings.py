@@ -175,3 +175,24 @@ STAMP_OVERLAP_TEXT_IOU = 0.15
 API_KEYS = {
     "lr-demo-key-2026": "Demo LRMS integration client",
 }
+
+# --- Adaptive preprocessing ---
+ADAPTIVE_PREPROCESS_ENABLED = True
+PIPELINE_DEBUG = False  # True writes per-stage debug images to media/debug/
+
+# Thresholds are documented in records/pipeline/quality.py (_DEFAULTS).
+# Override any subset here; unspecified keys fall back to defaults.
+PREPROCESSING_CONFIG = {
+    "min_width": 900,
+    "min_height": 900,
+    "max_side": 3200,
+    "blur_threshold": 90.0,        # Laplacian variance below this = blurry
+    "noise_threshold": 12.0,       # residual std above this = noisy
+    "contrast_threshold": 45.0,    # global std below this = low contrast
+    "dark_pixel_pct": 0.35,        # >35% very dark pixels -> heavy
+    "bright_pixel_pct": 0.55,      # >55% near-white -> faded -> heavy
+    "skew_threshold_deg": 1.5,
+    "edge_density_low": 0.010,
+    "edge_density_high": 0.22,
+    "stamp_ink_ratio": 0.010,      # cheap colored-ink pre-check
+}
