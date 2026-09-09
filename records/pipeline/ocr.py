@@ -1,19 +1,11 @@
 """
 OCR engine abstraction for the ILRDVS project.
 
-Supported languages are exactly the languages configured in config/settings.py:
-English, Hindi, Bengali, Tamil, Telugu, Kannada, Gujarati, Marathi and Punjabi.
-Auto mode uses all installed supported language packs and reports the dominant
-Indic script detected in the OCR output.
+Supported primary languages: English, Hindi, Tamil, Telugu, Kannada, Malayalam,
+plus Bengali, Gujarati, Marathi, Punjabi.
 
-Engine priority (settings.OCR_ENGINE_PRIORITY, default
-["bhashini", "tesseract", "paddle"]): run_ocr() / ocr_image() tries each
-engine in order and falls through to the next one if an engine isn't
-configured/installed or returns None. Bhashini
-(records/pipeline/bhashini_ocr.py) is the primary engine when
-BHASHINI_USER_ID/BHASHINI_API_KEY are set; Tesseract (this module) is the
-local fallback; PaddleOCR is last and only used if
-`pip install paddleocr paddlepaddle` has been run.
+Engine priority (settings.OCR_ENGINE_PRIORITY, default ["bhashini", "tesseract", "paddle"]):
+run_ocr() tries Bhashini -> Tesseract -> PaddleOCR in sequence.
 """
 from __future__ import annotations
 
@@ -27,38 +19,36 @@ from pytesseract import Output
 from records.pipeline import ocr_paddle
 from records.pipeline.bhashini_ocr import BhashiniOCR
 
-AVAILABLE_LANGS = ["eng", "hin", "ben", "tam", "tel", "kan", "guj", "mar", "pan"]
+AVAILABLE_LANGS = ["eng", "hin", "tam", "tel", "kan", "mal", "ben", "guj", "mar", "pan"]
+
 OCR_LANGUAGES = {
     "eng": "English",
-    "hin": "Hindi / हिन्दी" ,
-    "ben": "Bengali / বাংলা" ,
-    "tam": "Tamil / தமிழ்" ,
-    "tel": "Telugu / తెలుగు" ,
-    "kan": "Kannada / ಕನ್ನಡ" ,
-    "guj": "Gujarati / ગુજરાતી" ,
-    "mar": "Marathi / मराठी" ,
-    "pan": "Punjabi / ਪੰਜਾਬੀ" ,
+    "hin": "Hindi / हिन्दी",
+    "tam": "Tamil / தமிழ்",
+    "tel": "Telugu / తెలుగు",
+    "kan": "Kannada / ಕನ್ನಡ",
+    "mal": "Malayalam / മലയാളം",
+    "ben": "Bengali / বাংলা",
+    "guj": "Gujarati / ગુજરાતી",
+    "mar": "Marathi / मराठी",
+    "pan": "Punjabi / ਪੰਜਾਬੀ",
 }
 
-# A bilingual model is normally more accurate for land records because most
-# forms contain English field names, numbers, dates and an Indic language.
+# Bilingual models for local Tesseract fallback
 LANG_MODELS = {
     "eng": "eng",
     "hin": "hin+eng",
-    "ben": "ben+eng",
     "tam": "tam+eng",
     "tel": "tel+eng",
     "kan": "kan+eng",
+    "mal": "mal+eng",
+    "ben": "ben+eng",
     "guj": "guj+eng",
     "mar": "mar+eng",
     "pan": "pan+eng",
 }
 
-# Auto mode is deliberately limited to the languages in settings.py.
-# Tesseract accepts a + separated language list.  If one installed pack is
-# missing, _available_langs() below removes it instead of crashing the app.
-AUTO_CANDIDATES = ["eng", "hin", "ben", "tam", "tel", "kan", "guj", "mar", "pan"]
-AUTO_LANGS = "+".join(AUTO_CANDIDATES)
+AUTO_CANDIDATES = ["eng", "hin", "tam", "tel", "kan", "mal", "ben", "guj", "mar", "pan"]
 
 _SCRIPT_RANGES = {
     "hin": ("\u0900", "\u097F"),
@@ -68,10 +58,8 @@ _SCRIPT_RANGES = {
     "tam": ("\u0B80", "\u0BFF"),
     "tel": ("\u0C00", "\u0C7F"),
     "kan": ("\u0C80", "\u0CFF"),
+    "mal": ("\u0D00", "\u0D7F"),
 }
-
-# Malayalam is U+0D00..U+0D7F and must be explicitly included.
-_SCRIPT_RANGES["mal"] = ("\u0D00", "\u0D7F")
 
 _SCRIPT_TO_LANG = {
     "hin": "hin", "ben": "ben", "pan": "pan", "guj": "guj",
@@ -80,7 +68,6 @@ _SCRIPT_TO_LANG = {
 
 
 def _installed_languages() -> set[str]:
-    """Return installed Tesseract language codes when possible."""
     try:
         return set(pytesseract.get_languages(config=""))
     except Exception:
@@ -88,7 +75,6 @@ def _installed_languages() -> set[str]:
 
 
 def _available_langs(requested: str) -> str:
-    """Keep only requested language packs that are actually installed."""
     installed = _installed_languages()
     requested_codes = [x for x in requested.split("+") if x]
     usable = [x for x in requested_codes if x in installed]
@@ -98,12 +84,6 @@ def _available_langs(requested: str) -> str:
 
 
 def detect_script(text: str) -> str:
-    """Return dominant supported language code from Unicode script coverage.
-
-    Devanagari is reported as Hindi because Unicode script alone cannot
-    distinguish Hindi from Marathi.  The Marathi model remains selectable
-    explicitly through settings.py.
-    """
     counts = {code: 0 for code in _SCRIPT_RANGES}
     latin = 0
     for ch in text:
@@ -130,8 +110,9 @@ def tesseract_version() -> str:
 
 def _image_to_data(img, langs: str, psm: int):
     config = f"--psm {psm} --oem 1"
-    return pytesseract.image_to_data(img, lang=langs, config=config,
-                                     output_type=Output.DICT)
+    return pytesseract.image_to_data(img, lang=langs, config=config, output_type=Output.DICT)
+
+
 def _word_count(data) -> int:
     return sum(1 for t in data.get("text", []) if (t or "").strip())
 
@@ -154,12 +135,6 @@ def _run_once(img, langs: str, psm: int):
 
 
 def _select_auto_result(img, psm: int):
-    """Try the supported packs and select the strongest useful OCR result.
-
-    This is slower than one huge multi-language Tesseract call, but it avoids
-    the common problem where a nine-language model produces poor text because
-    too many script models compete for the same glyphs.
-    """
     installed = _installed_languages()
     candidates = [c for c in AUTO_CANDIDATES if c in installed]
     if not candidates:
@@ -175,7 +150,6 @@ def _select_auto_result(img, psm: int):
             continue
         text = " ".join(t for t in data.get("text", []) if (t or "").strip())
         script = detect_script(text)
-        # Prefer actual script coverage, then OCR confidence and word count.
         script_chars = sum(
             1 for ch in text
             for lo, hi in _SCRIPT_RANGES.values()
@@ -195,14 +169,10 @@ def _select_auto_result(img, psm: int):
     return data, psm, langs, script, count, avg
 
 
-# Ruled land-record forms often come back almost empty under PSM 4 because
-# the table rules break the layout analysis; when the page looks too sparse
-# we re-run with fully automatic PSM 3 and keep the richer result.
 LOW_WORD_RESCUE = 45
 
 
 def _tesseract_ocr_image(img, lang: str = "auto", psm: int = 4) -> dict:
-    """Run Tesseract OCR and return words, lines, text and diagnostics."""
     lang = (lang or "auto").strip().lower()
 
     if lang == "auto":
@@ -284,8 +254,18 @@ def _tesseract_ocr_image(img, lang: str = "auto", psm: int = 4) -> dict:
 
 
 def _bhashini_ocr_image(img, lang: str = "auto"):
-    """Run BhashiniOCR; return a pipeline dict or None to fall through."""
-    result = BhashiniOCR().recognize(img, lang=lang)
+    """Run BhashiniOCR with script pre-detection if language is auto."""
+    target_lang = lang
+    if lang == "auto":
+        # Quick fallback check on raw image text sample if auto
+        try:
+            sample = _tesseract_ocr_image(img, lang="eng", psm=3)
+            detected = detect_script(sample.get("text", ""))
+            target_lang = detected if detected in AVAILABLE_LANGS else "eng"
+        except Exception:
+            target_lang = "eng"
+
+    result = BhashiniOCR().recognize(img, lang=target_lang)
     if result is None:
         return None
     return result.to_pipeline_dict()
@@ -301,15 +281,7 @@ _SKIPPABLE = (ocr_paddle.PaddleUnavailable,)
 
 
 def run_ocr(img, lang: str = "auto", psm: int = 4) -> dict:
-    """Try OCR engines in ``settings.OCR_ENGINE_PRIORITY`` order.
-
-    Default is Bhashini -> Tesseract -> PaddleOCR. An engine is skipped
-    when it returns ``None``, is unconfigured, or raises a skippable
-    error. Returns the same dict shape regardless of which engine served
-    the request.
-    """
-    priority = getattr(settings, "OCR_ENGINE_PRIORITY",
-                       ["bhashini", "tesseract", "paddle"])
+    priority = getattr(settings, "OCR_ENGINE_PRIORITY", ["bhashini", "tesseract", "paddle"])
     attempted = []
     last_error = None
     for name in priority:
@@ -338,5 +310,4 @@ def run_ocr(img, lang: str = "auto", psm: int = 4) -> dict:
 
 
 def ocr_image(img, lang: str = "auto", psm: int = 4) -> dict:
-    """Back-compat alias for :func:`run_ocr`."""
     return run_ocr(img, lang=lang, psm=psm)
