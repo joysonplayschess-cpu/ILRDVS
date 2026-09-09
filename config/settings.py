@@ -115,15 +115,16 @@ LOGOUT_REDIRECT_URL = "login"
 # Minimum per-field confidence before the field is flagged for manual review.
 OCR_CONFIDENCE_THRESHOLD = 0.75
 
-# Tesseract language packs installed on the host.
+# Language packs available for OCR processing
 OCR_LANGUAGES = {
     "auto": "Auto-detect (eng+hin)",
     "eng": "English",
     "hin": "Hindi / हिन्दी",
-    "ben": "Bengali / বাংলা",
     "tam": "Tamil / தமிழ்",
     "tel": "Telugu / తెలుగు",
     "kan": "Kannada / ಕನ್ನಡ",
+    "mal": "Malayalam / മലയാളം",
+    "ben": "Bengali / বাংলা",
     "guj": "Gujarati / ગુજરાતી",
     "mar": "Marathi / मराठी",
     "pan": "Punjabi / ਪੰਜਾਬੀ",
@@ -131,29 +132,12 @@ OCR_LANGUAGES = {
 # Tesseract codes used for the auto-detect pass.
 OCR_AUTO_LANGS = "eng+hin"
 
-# Maximum PDF pages processed per document. Pages beyond this cap are
-# never enhanced, OCR'd, or fed into field extraction -- only the true
-# source page count is still reported (Document.page_count); see
-# Document.processed_page_count for how many were actually processed.
-# Bump this (or override via env) if your real scans run longer than the
-# default; each extra page costs one more enhance+OCR pass so very high
-# values will slow multi-page uploads down proportionally.
+# Maximum PDF pages processed per document.
 OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "20"))
 
 # ---------------------------------------------------------------------------
 # OCR engine priority + Bhashini (Digital India / MeitY ULCA) credentials
 # ---------------------------------------------------------------------------
-# vvv PUT YOUR BHASHINI KEY HERE (or, better, set it as an env var instead
-# of editing this file -- see the "export" lines below / README "Bhashini
-# setup"). Get a free key at https://bhashini.gov.in -> sign in -> your
-# profile -> "My Profile" -> generate ULCA API key. You'll get a User ID
-# and an API key.
-#
-#   export BHASHINI_USER_ID="your-user-id"
-#   export BHASHINI_API_KEY="your-ulca-api-key"
-#
-# Leave both blank/unset to skip Bhashini entirely -- the pipeline falls
-# through to Tesseract automatically with no code changes needed.
 def _env(key, default=""):
     """Read an env var, treating missing or blank values as `default`."""
     value = os.environ.get(key)
@@ -175,12 +159,7 @@ BHASHINI_PIPELINE_URL = _env(
 BHASHINI_OCR_TIMEOUT = int(_env("BHASHINI_OCR_TIMEOUT", "120"))
 BHASHINI_MAX_IMAGE_SIDE = int(_env("BHASHINI_MAX_IMAGE_SIDE", "2000"))
 
-# OCR engines are tried in this order for every page; each is skipped
-# automatically (no error) if it isn't configured/installed, or if it
-# raises on this particular image -- see records/pipeline/ocr.py.
-#   1. bhashini   - primary.   Needs BHASHINI_USER_ID/BHASHINI_API_KEY above.
-#   2. tesseract  - secondary. Always available (see requirements.txt).
-#   3. paddle     - tertiary.  Needs `pip install paddleocr paddlepaddle`.
+# OCR engine execution priority order
 OCR_ENGINE_PRIORITY = ["bhashini", "tesseract", "paddle"]
 
 # ---------------------------------------------------------------------------
@@ -192,8 +171,7 @@ STAMP_MAX_AREA_RATIO = 0.12
 STAMP_REQUIRE_CERT_BLOCK = True
 STAMP_OVERLAP_TEXT_IOU = 0.15
 
-# Simple shared API keys for machine-to-machine integration (LRMS / DILRMP
-# style consumers).  In production use signed tokens / OAuth2 client creds.
+# Simple shared API keys for machine-to-machine integration
 API_KEYS = {
     "lr-demo-key-2026": "Demo LRMS integration client",
 }
