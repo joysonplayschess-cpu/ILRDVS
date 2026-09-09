@@ -140,6 +140,22 @@ def upload(request):
                 messages.error(request, f"{fh.name}: unsupported file type {ext!r}.")
                 failures += 1
                 continue
+
+            # Deduplication guard: prevent double-clicks from creating duplicate jobs
+            active_job = Document.objects.filter(
+                original_name=fh.name,
+                file_size=fh.size,
+                status="PROCESSING",
+                uploaded_by=request.user
+            ).first()
+
+            if active_job:
+                messages.warning(
+                    request,
+                    f"'{fh.name}' is already being processed (Document #{active_job.pk}). Skipping duplicate submission."
+                )
+                continue
+
             doc = Document.objects.create(
                 file=fh, original_name=fh.name, file_size=fh.size,
                 language=language, state_name=state_name,
@@ -147,9 +163,17 @@ def upload(request):
             log_audit(request.user, "UPLOAD", doc,
                       f"Uploaded '{fh.name}' ({fh.size / 1024:.0f} KB)",
                       request=request)
-            record = service.process_document(
-                doc, gamma_mode=gamma_mode, gamma_value=gamma_value,
-                lang=language)
+            
+            try:
+                record = service.process_document(
+                    doc, gamma_mode=gamma_mode, gamma_value=gamma_value,
+                    lang=language)
+            except Exception as exc:
+                doc.status = "FAILED"
+                doc.error_message = f"Processing error: {exc}"
+                doc.save(update_fields=["status", "error_message"])
+                record = None
+
             if record is None:
                 messages.error(request, f"{fh.name}: processing failed - "
                                         f"see document log for details.")
@@ -214,9 +238,11 @@ def document_detail(request, pk):
         Q(object_type="LandRecord",
           object_id=str(record.pk) if record else "-1")
     )[:30]
+    pages = doc.pages.all().order_by("page_number")
+
     return render(request, "records/document_detail.html", {
         "doc": doc, "record": record, "fields": fields, "issues": issues,
-        "audits": audits, "role": get_role(request.user),
+        "pages": pages, "audits": audits, "role": get_role(request.user),
         "threshold_pct": settings.OCR_CONFIDENCE_THRESHOLD * 100,
     })
 
@@ -233,9 +259,16 @@ def document_reprocess(request, pk):
         gamma_value = None
     log_audit(request.user, "REPROCESS", doc, "Re-run of the OCR pipeline",
               request=request)
-    record = service.process_document(doc, gamma_mode=gamma_mode,
-                                      gamma_value=gamma_value,
-                                      lang=doc.language)
+    try:
+        record = service.process_document(doc, gamma_mode=gamma_mode,
+                                          gamma_value=gamma_value,
+                                          lang=doc.language)
+    except Exception as exc:
+        doc.status = "FAILED"
+        doc.error_message = f"Reprocessing failed: {exc}"
+        doc.save(update_fields=["status", "error_message"])
+        record = None
+
     if record:
         messages.success(request, "Document re-processed successfully.")
     else:
@@ -300,8 +333,12 @@ def verify_record(request, pk):
             "method": row.method if row else "",
             "needs_review": bool(row and row.needs_review),
         })
+    
+    pages = record.document.pages.all().order_by("page_number")
+
     return render(request, "records/verify.html", {
         "record": record, "doc": record.document, "fields": fields,
+        "pages": pages,
         "issues": record.issues.filter(resolved=False),
         "field_labels": FIELD_LABELS, "role": get_role(request.user),
     })
