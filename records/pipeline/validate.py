@@ -8,37 +8,85 @@ reference data) and duplicate detection across the digitised corpus.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date
 
 from records.constants import AREA_UNITS, FIELD_LABELS, REQUIRED_FIELDS
 
-# Cross-database reference sample (in production: the DILRMP master data
-# services / state land-record APIs would be queried in real time).
+# Cross-database reference master data for Indic states & districts
 STATE_DISTRICTS = {
-    "Uttar Pradesh": ["Varanasi", "Lucknow", "Prayagraj", "Agra", "Kanpur Nagar",
-                      "Gorakhpur"],
-    "Bihar": ["Patna", "Gaya", "Muzaffarpur", "Bhagalpur"],
-    "Madhya Pradesh": ["Bhopal", "Indore", "Gwalior", "Jabalpur", "Sehore"],
-    "Rajasthan": ["Jaipur", "Jodhpur", "Udaipur", "Ajmer"],
-    "West Bengal": ["Kolkata", "Howrah", "Darjeeling", "Hooghly"],
-    "Maharashtra": ["Pune", "Mumbai", "Nagpur", "Nashik"],
-    "Karnataka": ["Bengaluru Urban", "Mysuru", "Belagavi", "Hubballi"],
-    "Tamil Nadu": ["Chennai", "Coimbatore", "Madurai", "Thanjavur"],
-    "Gujarat": ["Ahmedabad", "Surat", "Vadodara", "Rajkot"],
-    "Punjab": ["Ludhiana", "Amritsar", "Patiala", "Jalandhar"],
-    "Telangana": ["Hyderabad", "Warangal", "Karimnagar"],
+    "Tamil Nadu": [
+        "Chennai", "Coimbatore", "Madurai", "Thanjavur", "Kanchipuram",
+        "Chengalpattu", "Tiruvallur", "Salem", "Tiruchirappalli", "Tirunelveli",
+        "Erode", "Vellore", "Dharmapuri", "Kanyakumari", "Nilgiris", "Dindigul",
+        "Karur", "Namakkal", "Perambalur", "Pudukkottai", "Ramanathapuram",
+        "Sivaganga", "Theni", "Thoothukudi", "Tiruppur", "Tiruvannamalai",
+        "Tiruvarur", "Viluppuram", "Virudhunagar", "Ariyalur", "Krishnagiri",
+        "Nagapattinam", "Ranipet", "Tenkasi", "Tirupathur", "Mayiladuthurai"
+    ],
+    "Telangana": [
+        "Hyderabad", "Warangal", "Karimnagar", "Ranga Reddy", "Medchal-Malkajgiri",
+        "Sangareddy", "Nizamabad", "Khammam", "Nalgonda", "Mahbubnagar",
+        "Adilabad", "Bhadradri Kothagudem", "Jagtial", "Jangaon", "Jayashankar",
+        "Jogulamba", "Kamareddy", "Komaram Bheem", "Mahabubabad", "Mancherial",
+        "Medak", "Mulugu", "Nagarkurnool", "Narayanpet", "Nirmal", "Peddapalli",
+        "Rajanna Sircilla", "Siddipet", "Suryapet", "Vikarabad", "Wanaparthy",
+        "Yadadri Bhuvanagiri"
+    ],
+    "Karnataka": [
+        "Bengaluru Urban", "Bengaluru Rural", "Mysuru", "Belagavi", "Hubballi-Dharwad",
+        "Dharwad", "Dakshina Kannada", "Udupi", "Hassan", "Mandya", "Tumakuru",
+        "Ballari", "Bidar", "Chamarajanagar", "Chikkaballapura", "Chikkamagaluru",
+        "Chitradurga", "Davangere", "Gadag", "Kalaburagi", "Kodagu", "Kolar",
+        "Koppal", "Ramanagara", "Shivamogga", "Haveri", "Uttara Kannada",
+        "Vijayapura", "Yadgir", "Vijayanagara"
+    ],
+    "Kerala": [
+        "Thiruvananthapuram", "Kollam", "Pathanamthitta", "Alappuzha", "Kottayam",
+        "Idukki", "Ernakulam", "Thrissur", "Palakkad", "Malappuram", "Kozhikode",
+        "Wayanad", "Kannur", "Kasaragod"
+    ],
+    "Andhra Pradesh": [
+        "Visakhapatnam", "Vijayawada", "Guntur", "Tirupati", "Kakinada", "Nellore",
+        "Kurnool", "Anantapur", "Kadapa", "Chittoor", "East Godavari", "West Godavari",
+        "Prakasam", "Srikakulam", "Vizianagaram"
+    ],
+    "Uttar Pradesh": [
+        "Varanasi", "Lucknow", "Prayagraj", "Agra", "Kanpur Nagar", "Gorakhpur",
+        "Ayodhya", "Meerut", "Ghaziabad", "Gautam Buddha Nagar", "Bareilly",
+        "Aligarh", "Mathura", "Jhansi", "Saharanpur", "Moradabad", "Bhopal"
+    ],
+    "Madhya Pradesh": [
+        "Bhopal", "Indore", "Gwalior", "Jabalpur", "Sehore", "Ujjain", "Sagar",
+        "Rewa", "Satna", "Dhar", "Dewas"
+    ],
+    "Bihar": ["Patna", "Gaya", "Muzaffarpur", "Bhagalpur", "Darbhanga", "Purnia"],
+    "Rajasthan": ["Jaipur", "Jodhpur", "Udaipur", "Ajmer", "Kota", "Bikaner"],
+    "West Bengal": ["Kolkata", "Howrah", "Darjeeling", "Hooghly", "North 24 Parganas", "South 24 Parganas"],
+    "Maharashtra": ["Pune", "Mumbai", "Mumbai Suburban", "Nagpur", "Nashik", "Thane", "Aurangabad", "Solapur"],
+    "Gujarat": ["Ahmedabad", "Surat", "Vadodara", "Rajkot", "Gandhinagar", "Bhavnagar"],
+    "Punjab": ["Ludhiana", "Amritsar", "Patiala", "Jalandhar", "Bathinda", "Mohali"],
 }
-STATE_ALIASES = {"U.P.": "Uttar Pradesh", "UP": "Uttar Pradesh",
-                 "M.P.": "Madhya Pradesh", "MP": "Madhya Pradesh",
-                 "W.B.": "West Bengal", "TN": "Tamil Nadu",
-                 "T.N.": "Tamil Nadu"}
 
-PLOT_ID_RE = re.compile(r"^[0-9A-Za-z]+([/\-][0-9A-Za-z]+)*$")
+STATE_ALIASES = {
+    "U.P.": "Uttar Pradesh", "UP": "Uttar Pradesh",
+    "M.P.": "Madhya Pradesh", "MP": "Madhya Pradesh",
+    "W.B.": "West Bengal",
+    "TN": "Tamil Nadu", "T.N.": "Tamil Nadu", "Tamilnadu": "Tamil Nadu",
+    "TS": "Telangana", "T.S.": "Telangana", "TG": "Telangana",
+    "KA": "Karnataka", "K.A.": "Karnataka",
+    "KL": "Kerala", "K.L.": "Kerala",
+    "AP": "Andhra Pradesh", "A.P.": "Andhra Pradesh"
+}
+
+# Unicode-aware plot ID pattern (allows native digits, slashes, hyphens)
+PLOT_ID_RE = re.compile(r"^[0-9A-Za-z\u0900-\u0DFF]+([/\-][0-9A-Za-z\u0900-\u0DFF]+)*$")
 DATE_RE = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$")
 
 
 def _parse_date(value: str):
-    m = DATE_RE.match((value or "").strip())
+    val = unicodedata.normalize("NFKC", (value or "").strip())
+    m = DATE_RE.match(val)
     if not m:
         return None
     d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -51,7 +99,8 @@ def _parse_date(value: str):
 
 
 def _norm(text: str) -> str:
-    return " ".join((text or "").split()).strip().lower()
+    cleaned = unicodedata.normalize("NFKC", text or "")
+    return " ".join(cleaned.split()).strip().lower()
 
 
 def validate_record(record) -> list[dict]:
@@ -111,13 +160,16 @@ def validate_record(record) -> list[dict]:
                     f"{label} {raw} lies in the future.")
 
     # -- 6. state <-> district cross-check ----------------------------------
-    state = STATE_ALIASES.get(record.state, record.state)
-    if state and record.district:
-        known = STATE_DISTRICTS.get(state)
-        if known is not None and record.district not in known:
-            add("STATE_DISTRICT", "district", "warning",
-                f"'{record.district}' is not listed under {state} in the "
-                f"reference master data - please confirm.")
+    state_normalized = STATE_ALIASES.get(record.state, record.state)
+    if state_normalized and record.district:
+        known_districts = STATE_DISTRICTS.get(state_normalized)
+        if known_districts is not None:
+            # Case-insensitive search across known districts
+            district_match = any(_norm(record.district) == _norm(d) for d in known_districts)
+            if not district_match:
+                add("STATE_DISTRICT", "district", "warning",
+                    f"'{record.district}' is not listed under {state_normalized} in the "
+                    f"reference master data - please confirm.")
 
     # -- 7. duplicate detection --------------------------------------------
     from records.models import LandRecord

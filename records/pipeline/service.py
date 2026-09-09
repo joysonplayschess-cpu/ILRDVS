@@ -2,7 +2,7 @@
 Pipeline orchestration.
 
 ``process_document`` drives a Document through
-enhancement -> OCR -> field extraction -> validation -> record creation.
+enhancement -> stamp detection -> OCR -> field extraction -> validation -> record creation.
 
 ``apply_verification`` persists human corrections, feeds the learning
 memory, re-runs validation and updates the record status.
@@ -21,7 +21,7 @@ from django.utils import timezone
 from records.constants import FIELD_KEYS, FIELD_WEIGHTS
 from records.models import (Document, DocumentPage, FieldExtraction,
                             LandRecord, ValidationIssue)
-from . import extract, ocr, preprocess, table_extract, validate
+from records.pipeline import extract, ocr, preprocess, stamps, table_extract, validate
 
 
 def _log(doc: Document, stage: str, **extra):
@@ -62,25 +62,40 @@ def process_document(doc: Document, gamma_mode: str = "auto",
         else:
             _log(doc, "load", pages=len(pages))
 
-        # ---------------- 2. enhance + OCR each page ------------------
+        # ---------------- 2. detect stamps, enhance + OCR each page ----
         merged_lines, merged_words = [], []
         merged_text, confs, engine, used_lang = [], [], "", ""
         detected = ""
         pre_info = {}
         table_fields_all: dict[str, dict] = {}
+        all_stamp_issues: list[dict] = []
+        
         DocumentPage.objects.filter(document=doc).delete()
         for i, page in enumerate(pages):
-            pre = preprocess.preprocess_image(
-                page, gamma=gamma_mode, gamma_value=gamma_value)
+            # Stamp & seal detection on original page
+            stamp_report = stamps.detect_stamps(page)
+            if stamp_report.boxes:
+                _log(doc, "stamp_detect", page=i + 1,
+                     stamps_found=len(stamp_report.boxes),
+                     circularity=f"{stamp_report.circularity:.2f}")
+
+            # Enhance image (passing stamp mask if supported by preprocess)
+            try:
+                pre = preprocess.preprocess_image(
+                    page, gamma=gamma_mode, gamma_value=gamma_value,
+                    stamp_mask=stamp_report.mask
+                )
+            except TypeError:
+                pre = preprocess.preprocess_image(
+                    page, gamma=gamma_mode, gamma_value=gamma_value
+                )
+
             pre_info = pre["info"]
             _log(doc, "enhance", page=i + 1, gamma=pre_info["gamma_used"],
                  skew=pre_info["skew_angle"],
                  brightness=f"{pre_info['mean_brightness_before']:.0f} -> "
                             f"{pre_info['mean_brightness_after']:.0f}")
-            # Every page's enhanced preview is kept (not just page 1) so the
-            # verification UI can show that the whole file was actually
-            # processed -- the field extraction below already merges text
-            # from every page; this only fixes what was visible.
+
             ok, buf = cv2.imencode(".png", pre["processed"])
             page_row = None
             if ok:
@@ -102,6 +117,7 @@ def process_document(doc: Document, gamma_mode: str = "auto",
                 if page_row is not None:
                     page_row.save()
                 continue
+
             engine, used_lang = ocr_res["engine"], ocr_res["lang_used"]
             detected = ocr_res["detected_language"]
             confs.append(ocr_res["avg_conf"])
@@ -110,22 +126,28 @@ def process_document(doc: Document, gamma_mode: str = "auto",
                 page_row.ocr_confidence = ocr_res["avg_conf"]
                 page_row.word_count = ocr_res["word_count"]
                 page_row.save()
-            # tag geometry with the page so the layout-aware extractor never
-            # matches a label on page 1 with a value on page 2
+
+            # Tag geometry with page number
             for wd in ocr_res["words"]:
                 wd["page"] = i
             for ln in ocr_res["lines"]:
                 ln["page"] = i
-            merged_lines.extend(ocr_res["lines"])
+            merged_lines.extend(ocr_res["words"])
             merged_words.extend(ocr_res["words"])
+
+            # Validate stamps against page OCR bounding boxes & text
+            page_stamp_issues = stamps.validate_stamps(
+                stamp_report, word_boxes=ocr_res["words"], ocr_text=ocr_res["text"]
+            )
+            if page_stamp_issues:
+                all_stamp_issues.extend(page_stamp_issues)
+                _log(doc, "stamp_validate", page=i + 1, issues=len(page_stamp_issues))
+
             _log(doc, "ocr", page=i + 1, words=ocr_res["word_count"],
                  confidence=f"{ocr_res['avg_conf'] * 100:.1f}%",
                  language=used_lang)
 
-            # Ruled-table cells independently of Tesseract's page-level
-            # line grouping -- catches values a wrapped multi-column
-            # header would otherwise cause the line/label-based extractor
-            # below to misread (see pipeline/table_extract.py docstring).
+            # Ruled-table cell extraction
             try:
                 page_table_fields = table_extract.extract_table_fields(
                     page, lang=used_lang)
@@ -156,10 +178,7 @@ def process_document(doc: Document, gamma_mode: str = "auto",
             fields = extract.extract_fields({"lines": [], "words": [],
                                              "text": ""})
 
-        # Ruled-table cell OCR (step 2) wins over the line/label-based
-        # result wherever it found a value with higher confidence -- it is
-        # immune to the wrapped-header line-grouping issue the line-based
-        # extractor can fall into on multi-column tables.
+        # Table cell values override if confidence is higher
         threshold = getattr(settings, "OCR_CONFIDENCE_THRESHOLD", 0.75)
         table_hits = 0
         for k, v in table_fields_all.items():
@@ -216,7 +235,7 @@ def process_document(doc: Document, gamma_mode: str = "auto",
             ])
 
         # ---------------- 5. validation --------------------------------
-        revalidate(record)
+        revalidate(record, extra_issues=all_stamp_issues)
         n_err = record.issues.filter(severity="error", resolved=False).count()
         _log(doc, "validate", issues=record.issues.count(), errors=n_err,
              duplicate=record.is_duplicate)
@@ -240,7 +259,7 @@ def process_document(doc: Document, gamma_mode: str = "auto",
                   f"{record.issues.count()} validation issue(s).")
         return record
 
-    except Exception as exc:  # noqa: BLE001 - we must not lose the document
+    except Exception as exc:  # noqa: BLE001
         doc.status = "FAILED"
         doc.error_message = f"{exc.__class__.__name__}: {exc}"
         _log(doc, "error", error=doc.error_message)
@@ -266,10 +285,19 @@ def _aggregate_confidence(record: LandRecord) -> float:
     return round(num / den, 4) if den else 0.0
 
 
-def revalidate(record: LandRecord) -> int:
+def revalidate(record: LandRecord, extra_issues: list[dict] | None = None) -> int:
     """Re-run the rule engine; returns the number of open error issues."""
     record.issues.all().delete()
     issues = validate.validate_record(record)
+    if extra_issues:
+        # Merge stamp validation issues deduplicated by rule_code & message
+        seen = {(i["rule_code"], i.get("message", "")) for i in issues}
+        for ei in extra_issues:
+            key = (ei["rule_code"], ei.get("message", ""))
+            if key not in seen:
+                issues.append(ei)
+                seen.add(key)
+
     ValidationIssue.objects.bulk_create(
         [ValidationIssue(record=record, **i) for i in issues])
     record.is_duplicate = any(i["rule_code"] == "DUPLICATE_PLOT"
@@ -324,7 +352,6 @@ def apply_verification(record: LandRecord, cleaned: dict, user,
             record.status = "VERIFIED"
             record.verified_by = user if user.is_authenticated else None
             record.verified_at = timezone.now()
-        # else it stays PENDING with the open error issues listed
 
         record.overall_confidence = _aggregate_confidence(record)
         record.save()

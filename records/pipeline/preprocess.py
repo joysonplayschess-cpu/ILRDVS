@@ -4,12 +4,13 @@ Computer-vision enhancement pipeline for degraded land-record scans.
 Steps
 -----
 1.  Grayscale conversion
-2.  **Gamma correction** (automatic or manual) - recovers faded / dark scans
-3.  Denoising (Non-Local Means / median fallback)
-4.  CLAHE local contrast normalisation
-5.  Adaptive binarization (Gaussian adaptive threshold)
-6.  Speckle (noise blob) removal
-7.  Deskew (min-area-rect angle estimation)
+2.  Stamp/seal ink softening (Telea inpainting with stamp mask)
+3.  **Gamma correction** (automatic or manual) - recovers faded / dark scans
+4.  Denoising (Non-Local Means / median fallback)
+5.  CLAHE local contrast normalisation
+6.  Adaptive binarization (Gaussian adaptive threshold)
+7.  Speckle (noise blob) removal (Indic-safe)
+8.  Deskew (min-area-rect angle estimation)
 
 Every step records diagnostics that are surfaced in the UI so operators can
 see exactly which enhancements were applied.
@@ -35,10 +36,7 @@ def load_pages(path: str | Path, max_pages: int = 5, pdf_zoom: float = 2.0):
 
     ``pages`` holds at most ``max_pages`` BGR ndarrays (the ones actually
     enhanced + OCR'd). ``source_page_count`` is the *true* number of pages
-    in the source file, uncapped -- callers must not confuse the two, or a
-    PDF with more pages than ``max_pages`` will silently be reported as
-    having only as many pages as were processed (see Document.page_count /
-    Document.processed_page_count).
+    in the source file, uncapped.
     """
     path = Path(path)
     if path.suffix.lower() == ".pdf":
@@ -73,7 +71,7 @@ def load_pages(path: str | Path, max_pages: int = 5, pdf_zoom: float = 2.0):
 # Gamma correction
 # ---------------------------------------------------------------------------
 def auto_gamma_value(gray: np.ndarray) -> float:
-    """Pick gamma so mid-tones land at 0.5.  gamma>1 brightens, <1 darkens."""
+    """Pick gamma so mid-tones land at 0.5. gamma>1 brightens, <1 darkens."""
     mean = float(np.mean(gray)) / 255.0
     mean = min(max(mean, 0.05), 0.95)
     gamma = math.log(mean) / math.log(0.5)
@@ -121,8 +119,11 @@ def _rotate(image: np.ndarray, angle: float, border=(255, 255, 255)):
                           borderValue=border)
 
 
-def _despeckle(binary: np.ndarray, min_area: int = 10) -> np.ndarray:
-    """Remove tiny isolated black blobs (scan noise)."""
+def _despeckle(binary: np.ndarray, min_area: int = 6) -> np.ndarray:
+    """Remove tiny isolated black blobs (scan noise).
+    
+    min_area set to 6 (Indic-safe) to preserve Malayalam/Kannada/Telugu dots.
+    """
     inv = cv2.bitwise_not(binary)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(inv, 8)
     out = np.zeros_like(inv)
@@ -133,12 +134,7 @@ def _despeckle(binary: np.ndarray, min_area: int = 10) -> np.ndarray:
 
 
 def _remove_rules(binary: np.ndarray):
-    """Remove long horizontal/vertical table rules and page frames.
-
-    Legacy land registers are ruled forms; long ruling lines break OCR line
-    segmentation.  Morphological opening detects them and inpainting heals
-    the text strokes they crossed.
-    """
+    """Remove long horizontal/vertical table rules and page frames."""
     inv = cv2.bitwise_not(binary)
     h, w = binary.shape[:2]
     klen = max(40, w // 18)
@@ -160,10 +156,12 @@ def _remove_rules(binary: np.ndarray):
 # ---------------------------------------------------------------------------
 def preprocess_image(bgr: np.ndarray, gamma="auto", gamma_value: float | None = None,
                      denoise: bool = True, binarize: bool = True,
-                     deskew: bool = True) -> dict:
+                     deskew: bool = True,
+                     stamp_mask: np.ndarray | None = None) -> dict:
     """Run the full enhancement chain.
 
     ``gamma``: ``"auto"`` | ``"off"`` | ``"manual"`` (with ``gamma_value``).
+    ``stamp_mask``: Optional binary mask of stamp/seal ink for Telea inpainting.
     Returns ``{processed, enhanced_gray, gray, info}``.
     """
     t0 = time.perf_counter()
@@ -183,6 +181,18 @@ def preprocess_image(bgr: np.ndarray, gamma="auto", gamma_value: float | None = 
     # 1. grayscale
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     steps.append({"name": "Grayscale", "detail": "single-channel luminance"})
+
+    # 1.5. stamp/seal ink inpainting (if mask supplied)
+    if stamp_mask is not None and getattr(stamp_mask, "size", 0) > 0:
+        try:
+            m = stamp_mask
+            if m.shape[:2] != (gray.shape[0], gray.shape[1]):
+                m = cv2.resize(m, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
+            if cv2.countNonZero(m) > 0:
+                gray = cv2.inpaint(gray, m, 3, cv2.INPAINT_TELEA)
+                steps.append({"name": "Stamp Inpaint", "detail": "softened official seal/stamp ink"})
+        except Exception:
+            pass
 
     # 2. gamma correction ------------------------------------------------
     if gamma == "auto":
@@ -223,8 +233,8 @@ def preprocess_image(bgr: np.ndarray, gamma="auto", gamma_value: float | None = 
             enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, blockSize=35, C=15)
         steps.append({"name": "Binarize", "detail": "adaptive Gaussian (35, 15)"})
-        binary = _despeckle(binary)
-        steps.append({"name": "Despeckle", "detail": "remove blobs < 10 px"})
+        binary = _despeckle(binary, min_area=6)
+        steps.append({"name": "Despeckle", "detail": "remove blobs < 6 px"})
         binary, removed = _remove_rules(binary)
         if removed:
             steps.append({"name": "De-rule",
@@ -248,11 +258,11 @@ def preprocess_image(bgr: np.ndarray, gamma="auto", gamma_value: float | None = 
             gray = _rotate(gray, angle)
         steps.append({"name": "Deskew",
                       "detail": f"estimated angle {angle:+.2f} deg"
-                                + ("" if abs(angle) > 0.25 else " (skipped)" )})
+                                + ("" if abs(angle) > 0.25 else " (skipped)")})
 
     processed = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
     info = {
-        "gamma_mode": gamma if gamma != "manual" else f"manual",
+        "gamma_mode": gamma if gamma != "manual" else "manual",
         "gamma_used": round(g_used, 3),
         "skew_angle": round(angle, 2),
         "input_size": [w, h],

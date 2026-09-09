@@ -20,10 +20,6 @@ Pipeline implemented here, in this order:
 Every field returned carries ``value``, ``confidence``, ``method`` (a plain
 description of *how* it was found) and ``evidence`` (the OCR line it came
 from) so nothing shown in the UI is invented.
-
-Input is the OCR bundle produced by ``pipeline.ocr.ocr_image`` (or
-``pipeline.ocr_text.bundle_from_text``): ``{"lines": [...], "words": [...],
-"text": str}`` where each word has ``text, conf, x, y, w, h``.
 """
 from __future__ import annotations
 
@@ -42,8 +38,6 @@ from .indic_labels import INDIC_LABELS
 # ---------------------------------------------------------------------------
 # 1. Normalisation helpers
 # ---------------------------------------------------------------------------
-# Characters Tesseract habitually swaps on degraded scans.  Applied ONLY when
-# comparing label candidates -- never to the stored value.
 _CONFUSABLES = str.maketrans({
     "0": "o", "1": "l", "5": "s", "8": "b", "6": "g", "9": "g", "2": "z",
     "|": "l", "!": "l", "@": "a", "$": "s", "£": "e", "¢": "c", "€": "e",
@@ -77,8 +71,6 @@ def _ratio(a: str, b: str) -> float:
 # ---------------------------------------------------------------------------
 # 2. Label lexicon
 # ---------------------------------------------------------------------------
-# field -> list of (alias, specificity).  Specificity < 1.0 marks generic
-# words ("name", "area", "no") that must lose against a specific alias.
 LABELS: dict[str, list[tuple[str, float]]] = {
     "owner_name": [
         ("owner name", 1.0), ("owners name", 1.0), ("owner's name", 1.0),
@@ -211,17 +203,8 @@ LABELS: dict[str, list[tuple[str, float]]] = {
         ("date of registry", 1.0), ("deed date", 1.0),
         ("पंजीकरण दिनांक", 1.0), ("पंजीकरण तिथि", 1.0),
     ],
-    # Pseudo-field: a bare "Date:" token.  Never stored, but it terminates a
-    # value and lets us attach the date to the identifier next to it.
     "_date": [("date", 0.6), ("dated", 0.7), ("dt", 0.6),
               ("दिनांक", 0.8), ("तिथि", 0.8)],
-    # Pseudo-field: table header cells, so "Field | Value" headers do not
-    # get mistaken for data. Also doubles as a boundary marker for columns
-    # this schema doesn't model as a field (e.g. "Soil Type", "Remarks" on
-    # a Tamil Nadu patta table) -- without registering *some* hit for them,
-    # `_inline_candidate` has no boundary to stop at and happily swallows
-    # an unmodeled header cell's text into whichever field's label sits
-    # immediately to its left (e.g. "Father's Name" grabbing "Soil Remark").
     "_header": [("value", 0.6), ("particulars", 0.8), ("description", 0.7),
                ("details", 0.6), ("sl no", 0.8), ("s.no.", 0.5),
                ("soil type", 0.85), ("soil", 0.75),
@@ -232,8 +215,6 @@ PSEUDO_FIELDS = {"_date", "_header"}
 
 
 def _merge_indic_labels() -> None:
-    """Fold the Indic catalogue (Hindi, Bengali, Tamil, Telugu, Malayalam,
-    Kannada, Gujarati, Marathi, Punjabi) into the alias lexicon."""
     for field, aliases in INDIC_LABELS.items():
         bucket = LABELS.setdefault(field, [])
         known = {a for a, _s in bucket}
@@ -245,7 +226,6 @@ def _merge_indic_labels() -> None:
 
 _merge_indic_labels()
 
-# Pre-folded index: field -> [(folded_alias, alias, specificity, word_folds)]
 ALIAS_INDEX = {
     field: sorted(((_fold(a), a, spec,
                     tuple(w for w in (_fold(x) for x in a.split()) if w))
@@ -258,10 +238,10 @@ _ALIAS_LENGTHS = {len(f) for aliases in ALIAS_INDEX.values()
 _MIN_ALIAS_LEN = min(_ALIAS_LENGTHS)
 _MAX_ALIAS_LEN = max(_ALIAS_LENGTHS)
 
-FUZZY_THRESHOLD = 0.85          # >= 7 chars ("villaqe" -> "village")
-FUZZY_THRESHOLD_MID = 0.87      # 5 chars
-FUZZY_THRESHOLD_MID6 = 0.83     # 6 chars ("extont" -> "extent")
-FUZZY_THRESHOLD_SHORT = 0.99    # <= 4 chars -> effectively exact
+FUZZY_THRESHOLD = 0.85
+FUZZY_THRESHOLD_MID = 0.87
+FUZZY_THRESHOLD_MID6 = 0.83
+FUZZY_THRESHOLD_SHORT = 0.99
 
 # ---------------------------------------------------------------------------
 # 3. Entity patterns
@@ -278,12 +258,7 @@ DATE_TXT2_RE = re.compile(r"\b([A-Za-z]{3,9})[\s\-,]+(\d{1,2})(?:st|nd|rd|th)?[\
 
 PIN_RE = re.compile(r"\b([1-9]\d{2}\s?\d{3})\b")
 NUM_RE = re.compile(r"\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?")
-# 123 | 123/4 | 123-A | 123/4A | 12/3-B | TS-45/2
-# NOTE: uses \d (Unicode-aware) throughout, not [0-9] -- plot identifiers
-# on Hindi/regional-script forms are frequently written with native-script
-# digits (e.g. Devanagari "४७/२"), and \d matches those too. An earlier
-# version mixed \d for the first number with [0-9] for the part after the
-# separator, which silently truncated e.g. "४७/२" -> "४७".
+
 PLOT_ID_RE = re.compile(
     r"\b(?:[A-Za-z]{1,4}[-/])?\d{1,6}[A-Za-z]{0,2}"
     r"(?:\s*[/-]\s*\d{1,5}[A-Za-z]{0,2}|\s*[/-]\s*[A-Za-z]{1,2}\b){0,3}")
@@ -296,7 +271,7 @@ AREA_UNIT_PATTERNS = [
               r"বর্গফুট|சதுர அடி|చదరపు అడుగులు|ચોરસ ફૂટ"),
     ("sq.m", r"sq\.?\s*m(?:tr|eters?|etres?)?\b|square\s*met(?:er|re)s?|वर्ग\s*मीटर"),
     ("sq.yd", r"sq\.?\s*y(?:d|ards?)\b|square\s*yards?|गज"),
-    ("cent", r"cents?\b|சென்ட்|সেন্ট|సెంటు|സെന്റ്|ಸೆಂಟ್"),
+    ("cent", r"cents?\b|சென்ட்|சент|సెంటు|സെന്റ്|ಸೆಂಟ್"),
     ("bigha", r"bighas?\b|बीघा"),
     ("biswa", r"bisw?as?\b|बिसवा"),
     ("guntha", r"gunthas?\b|guntas?\b|गुंठा"),
@@ -315,7 +290,6 @@ OWNERSHIP_HINTS = ["single", "joint", "individual", "co-owner", "coowner",
                    "government", "trust", "company", "institutional",
                    "एकल", "संयुक्त", "सरकारी", "व्यक्तिगत"]
 
-# Office boiler-plate and enum values that must never become a name/place.
 _STOP_VALUES = {
     "office", "government", "department", "form", "code", "revenue",
     "tehsildar", "collector", "signature", "seal", "date", "value",
@@ -324,7 +298,6 @@ _STOP_VALUES = {
     "single", "joint", "irrigated", "agricultural", "residential",
 }
 
-# Boiler-plate that must never become a value.
 _JUNK_RE = re.compile(
     r"(?i)^(?:n/?a|nil|none|-+|not\s*available|value|particulars|details)$")
 _HEADING_RE = re.compile(
@@ -336,12 +309,6 @@ _HEADING_RE = re.compile(
 # Geometry helpers
 # ---------------------------------------------------------------------------
 def _ensure_geometry(lines: list[dict]) -> list[dict]:
-    """Guarantee every word has x/y/w/h/conf/page.
-
-    Real Tesseract output always carries boxes, but the extractor is also fed
-    from plain text (PDF text layers, tests, pasted OCR dumps).  Synthesising
-    a fixed-width layout keeps the layout logic working instead of crashing.
-    """
     out = []
     y = 0
     for idx, line in enumerate(lines):
@@ -390,7 +357,7 @@ def _page_of(line: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Label matching (steps 2 + 3)
+# Label matching
 # ---------------------------------------------------------------------------
 class LabelHit:
     __slots__ = ("field", "start", "end", "score", "spec", "alias", "line",
@@ -404,23 +371,14 @@ class LabelHit:
 
     @property
     def strength(self) -> float:
-        """Combined label-match quality in [0, 1]."""
         return self.score * self.spec
 
-    def __repr__(self):  # pragma: no cover - debugging aid
+    def __repr__(self):
         return (f"<LabelHit {self.field} {self.alias!r} "
                 f"{self.score:.2f}x{self.spec} toks {self.start}:{self.end}>")
 
 
 def _match_alias(folded: str, tokens: tuple[str, ...] | None = None):
-    """Return [(field, score, specificity, alias)] matching a folded window.
-
-    Two comparison modes are combined:
-
-    * whole-window similarity  ("ownername" vs "0wnername")
-    * word-aligned similarity  ("ownr"+"nane" vs "owner"+"name") -- this is
-      what saves labels where *each* word picked up its own OCR error.
-    """
     out = []
     n = len(folded)
     if n < _MIN_ALIAS_LEN or n > _MAX_ALIAS_LEN + 6:
@@ -432,19 +390,6 @@ def _match_alias(folded: str, tokens: tuple[str, ...] | None = None):
             if folded == afold:
                 score = 1.0
             else:
-                # A *fuzzy* (non-exact) whole-window match against a
-                # multi-word alias is only trusted when the candidate window
-                # actually has that many tokens. Without this, a single
-                # generic word close in raw characters to a specific
-                # multi-word alias -- e.g. "number:" vs "sy number" (ratio
-                # 0.86, clears FUZZY_THRESHOLD) or "document" vs
-                # "document no" (0.89) -- can hijack a field from a
-                # completely unrelated line (a reference/document number
-                # elsewhere on the page getting read as the survey number).
-                # An exact fold match is unaffected: that already means the
-                # OCR text reproduced the alias verbatim (e.g. a single
-                # glued token "SurveyNo" folding to the same string as
-                # "survey no"), which is a real, safe match.
                 window_ok = len(words) <= 1 or (tokens and len(tokens) == len(words))
                 if window_ok and abs(len(afold) - n) <= max(2, int(len(afold) * 0.34)):
                     thr = (FUZZY_THRESHOLD_SHORT if len(afold) <= 4
@@ -455,9 +400,7 @@ def _match_alias(folded: str, tokens: tuple[str, ...] | None = None):
                     if r >= thr:
                         score = r
                         if len(folded) - len(afold) >= 2:
-                            # "tehsildar" vs "tehsil": a different word
                             score *= 0.78
-                # word-aligned mode
                 if (tokens and len(tokens) == len(words) and len(words) > 1
                         and score < 0.999):
                     per = [_ratio(t, w) for t, w in zip(tokens, words)]
@@ -474,7 +417,6 @@ def _match_alias(folded: str, tokens: tuple[str, ...] | None = None):
 
 
 def _find_labels_in_line(line: dict) -> list[LabelHit]:
-    """Exact + fuzzy label spotting inside a single OCR line."""
     toks = line.get("words") or []
     folded = [_fold(w["text"]) for w in toks]
     raw = [w["text"] for w in toks]
@@ -482,9 +424,6 @@ def _find_labels_in_line(line: dict) -> list[LabelHit]:
     n = len(toks)
 
     def _window_ok(i, size):
-        """A label window may not start/end on punctuation and may not end on
-        a token containing digits -- otherwise a fuzzy match happily swallows
-        the value ("Survey No : 88" -> label "survey no 88", value lost)."""
         if not folded[i] or not folded[i + size - 1]:
             return False
         last = raw[i + size - 1]
@@ -504,7 +443,6 @@ def _find_labels_in_line(line: dict) -> list[LabelHit]:
                 hits.append(LabelHit(field, i, i + size, score, spec, alias,
                                      line, "exact" if score == 1.0 else "fuzzy"))
 
-    # ---- glued label+value, e.g. "SurveyNo:123/4" or "District:Chennai" ----
     for i, tok in enumerate(raw):
         f = folded[i]
         if len(f) < 6 or not re.search(r"[A-Za-z\u0900-\u0DFF]", tok):
@@ -515,7 +453,6 @@ def _find_labels_in_line(line: dict) -> list[LabelHit]:
         for cut in range(_MIN_ALIAS_LEN, min(len(f), _MAX_ALIAS_LEN + 2)):
             prefix = f[:cut]
             for field, score, spec, alias in _match_alias(prefix):
-                # map the folded cut back to a raw offset
                 kept, raw_cut = 0, len(tok)
                 for pos, ch in enumerate(_nfkc(tok)):
                     if ch.isalnum():
@@ -534,9 +471,6 @@ def _find_labels_in_line(line: dict) -> list[LabelHit]:
             hits.append(LabelHit(field, i, i + 1, score * 0.95, spec, alias,
                                  line, "glued", rest))
 
-    # ---- overlap resolution: strongest match wins, longer span breaks
-    # ties (so an exact 3-token "classification of land" beats a 4-token
-    # fuzzy match that would have eaten the first value word).
     hits.sort(key=lambda h: (-(h.strength + 0.002 * (h.end - h.start)),
                              h.start))
     chosen: list[LabelHit] = []
@@ -548,9 +482,7 @@ def _find_labels_in_line(line: dict) -> list[LabelHit]:
         chosen.append(h)
         taken |= span
     chosen.sort(key=lambda h: h.start)
-    # A "glued" hit that sits *after* a real label is almost always part of
-    # the value itself (e.g. "Registration No  REG-2024/44"), so it must not
-    # truncate that value.
+
     first_real = next((h.start for h in chosen if h.kind != "glued"), None)
     if first_real is not None:
         chosen = [h for h in chosen
@@ -594,10 +526,8 @@ _SPLIT_DECIMAL_RE = re.compile(r"\b(\d{1,3})\s+(\d{2})\s*(?=[A-Za-z\u0900-\u0DFF
 
 
 def parse_area(text: str, require_unit: bool = False):
-    """-> (value: float|None, unit: str, quality: float)."""
     text = _nfkc(text or "")
     if detect_unit(text):
-        # "2 50 cents" -- Tesseract routinely drops the decimal point
         text = _SPLIT_DECIMAL_RE.sub(r"\1.\2 ", text)
     for m in NUM_RE.finditer(text):
         raw = m.group(0)
@@ -617,8 +547,6 @@ def parse_area(text: str, require_unit: bool = False):
 
 
 def parse_date(text: str):
-    """Recognise 12/05/2024, 12-05-2024, 12.05.2024, 12 May 2024,
-    May 12 2024 and 2024-05-12 -> canonical DD/MM/YYYY."""
     text = _nfkc(text or "")
 
     def _ok(d, mo, y):
@@ -637,7 +565,7 @@ def parse_date(text: str):
     if m:
         d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         got = _ok(d, mo, y)
-        if got is None and 1 <= d <= 12:      # tolerate MM/DD/YYYY
+        if got is None and 1 <= d <= 12:
             got = _ok(mo, d, y)
         if got:
             return got
@@ -657,7 +585,6 @@ def parse_date(text: str):
 
 
 def parse_plot_id(text: str):
-    """-> (id, quality). Handles 123, 123/4, 123-A, 123/4A, S.No 123/4."""
     text = _nfkc(text or "")
     text = re.sub(r"(?i)^\s*(?:no|number|nos)\b[.:\s]*", "", text.strip())
     if not any(ch.isdigit() for ch in text):
@@ -671,17 +598,11 @@ def parse_plot_id(text: str):
     return value, quality
 
 
-_NAME_TOKEN_RE = re.compile(r"^[A-Za-z\u0900-\u0DFF][A-Za-z\u0900-\u0DFF.'’\-]*$")
+# Added ZWJ (\u200d) and ZWNJ (\u200c) so Indic script conjuncts are preserved
+_NAME_TOKEN_RE = re.compile(r"^[A-Za-z\u0900-\u0DFF\u200c\u200d][A-Za-z\u0900-\u0DFF\u200c\u200d.'’\-]*$")
 
 
 def parse_name(text: str, max_tokens: int = 5):
-    """-> (name, quality).
-
-    Rejects numeric junk, office boiler-plate and the character soup a
-    badly degraded scan produces: tokens are accepted only while they look
-    like name tokens, so "ae, 4 es eS KAILASHCHAND" yields nothing rather
-    than a fake value.
-    """
     text = _clean_text(text or "")
     text = re.sub(r"(?i)^(?:shri|sri|smt|mr|mrs|ms|thiru|tmt)\.?\s+", "", text)
     text = re.sub(r"(?i)\b(?:s/o|w/o|d/o)\b.*$", "", text).strip()
@@ -748,7 +669,6 @@ FIELD_TYPES = {
 
 
 def parse_value(field: str, text: str):
-    """Typed parse -> (value, quality, extra) where extra may hold a unit."""
     kind = FIELD_TYPES.get(field, "text")
     if kind == "name":
         v, q = parse_name(text)
@@ -800,7 +720,6 @@ def _mean_conf(words, fallback=0.55) -> float:
 
 
 def _inline_candidate(hit: LabelHit, hits: list[LabelHit]):
-    """Value to the right of the label, cut at the next label on the line."""
     toks = hit.line.get("words") or []
     if hit.kind == "glued":
         w = toks[hit.start]
@@ -817,8 +736,6 @@ def _inline_candidate(hit: LabelHit, hits: list[LabelHit]):
 
 
 def _column_candidate(hit: LabelHit, lines, line_hits, idx):
-    """Table layout: value cell on the same row, further right, but OCR put
-    it in a different line group."""
     lx0, ly0, lx1, ly1 = _line_geom(hit.line)
     toks = hit.line.get("words") or []
     if not toks:
@@ -848,16 +765,6 @@ def _column_candidate(hit: LabelHit, lines, line_hits, idx):
 
 
 def _below_candidates(hit: LabelHit, lines, line_hits, idx):
-    """Yields each plausible value line below the label, nearest first.
-
-    A wrapped multi-column table header ("Survey No" / "Owner Name" / ...
-    each splitting onto a second OCR line before the real data row even
-    starts) means the line immediately below a label is sometimes still
-    header text, not data -- see app docs / the real-scan regression this
-    guards against. Yielding every candidate line (instead of only the
-    first) lets the caller keep trying until one actually parses for the
-    field's type, rather than committing to the first non-empty text.
-    """
     toks = hit.line.get("words") or []
     if not toks:
         return
@@ -876,7 +783,6 @@ def _below_candidates(hit: LabelHit, lines, line_hits, idx):
         if oy0 - ly1 > 2.5 * height:
             break
         other_hits = line_hits[j]
-        # A line that starts with a label belongs to the next field.
         if other_hits and other_hits[0].start == 0:
             return
         overlap = min(lx1, ox1) - max(lx0, ox0)
@@ -892,10 +798,6 @@ def _below_candidates(hit: LabelHit, lines, line_hits, idx):
 
 
 def _below_candidate(hit: LabelHit, lines, line_hits, idx):
-    """First candidate only -- kept for callers that don't need the retry
-    loop (e.g. ad-hoc scripts/tests); extract_fields uses
-    `_below_candidates` directly so it can keep trying lines below a
-    wrapped header until one actually parses."""
     for cand in _below_candidates(hit, lines, line_hits, idx):
         return cand
     return "", [], ""
@@ -923,13 +825,13 @@ def _score(field, value, quality, hit, words, position):
     lq, lq_desc = _label_quality(hit)
     pos_w = POSITION_WEIGHT.get(position, 0.85)
     conf = ocr_conf * (0.55 + 0.45 * lq) * (0.55 + 0.45 * quality) * pos_w
-    conf = max(0.05, min(0.99, conf))     # a value always keeps a floor score
+    conf = max(0.05, min(0.99, conf))
     method = f"{lq_desc} + {position}"
     return round(conf, 3), method
 
 
 # ---------------------------------------------------------------------------
-# Contextual / pattern-only fallbacks (no label found)
+# Contextual / pattern-only fallbacks
 # ---------------------------------------------------------------------------
 def _known_places():
     from .validate import STATE_DISTRICTS
@@ -939,7 +841,6 @@ def _known_places():
 
 
 def _pattern_fallbacks(text: str, lines, line_hits, found: dict) -> dict:
-    """Entity extraction that does not depend on a label being present."""
     out = {}
     low = text.lower()
 
@@ -971,7 +872,6 @@ def _pattern_fallbacks(text: str, lines, line_hits, found: dict) -> dict:
                 out["area_unit"] = (unit, 0.45,
                                     "pattern match: area unit next to number")
 
-    # dates that sit on the same line as their identifier
     for key, words in (("mutation_date", ("mutation", "दाखिल", "नामांतरण")),
                        ("registration_date", ("regist", "registry", "deed",
                                               "पंजीकरण", "रजिस्ट्री"))):
@@ -994,18 +894,12 @@ def _pattern_fallbacks(text: str, lines, line_hits, found: dict) -> dict:
 # Main entry point
 # ---------------------------------------------------------------------------
 def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
-    """Extract structured land-record fields from an OCR bundle.
-
-    Returns ``{field: {value, confidence, source, method, needs_review,
-    evidence}}`` for every field in ``FIELD_KEYS`` (empty values included so
-    downstream stages always see the full schema).
-    """
     from records.constants import REQUIRED_FIELDS
 
     threshold = getattr(settings, "OCR_CONFIDENCE_THRESHOLD", 0.75)
     try:
         lines = _ensure_geometry(list(ocr.get("lines") or []))
-    except Exception:                     # malformed OCR bundle
+    except Exception:
         lines = []
     text = ocr.get("text") or "\n".join(l.get("text", "") for l in lines)
 
@@ -1015,7 +909,6 @@ def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
 
     line_hits = _index_labels(lines)
 
-    # ---- collect every (field -> candidate) ------------------------------
     candidates: dict[str, list[tuple]] = {}
     date_context: list[tuple[int, LabelHit, str]] = []
 
@@ -1033,10 +926,6 @@ def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
                 value_text, words, position = _column_candidate(
                     hit, lines, line_hits, idx)
             if not value_text:
-                # Try every plausible line below in turn (nearest first)
-                # instead of committing to the first non-empty one -- a
-                # wrapped multi-column header can put non-value text on the
-                # very next line, and only a later line holds real data.
                 value_text, words, position = "", [], ""
                 for cand_text, cand_words, cand_pos in _below_candidates(
                         hit, lines, line_hits, idx):
@@ -1062,7 +951,6 @@ def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
                      f"{method} (unit parsed from the same value)", 1.0, hit,
                      {}, line["text"]))
 
-    # ---- bare "Date:" next to an identifier ------------------------------
     for idx, dhit, _ in date_context:
         hits = line_hits[idx]
         owner_field = None
@@ -1087,7 +975,6 @@ def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
                       f"{target.split('_')[0]} number", 1.0, dhit, {},
              lines[idx]["text"]))
 
-    # ---- pick the best candidate per field -------------------------------
     for field, cands in candidates.items():
         cands.sort(key=lambda c: (c[0] * (0.6 + 0.4 * c[3])
                                   * (0.55 + 0.45 * c[4].strength),
@@ -1096,7 +983,6 @@ def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
         result[field] = {"value": value, "confidence": conf, "source": "ocr",
                          "method": method, "evidence": evidence[:180]}
 
-    # ---- pattern-only fallbacks ------------------------------------------
     for field, (value, conf, method) in _pattern_fallbacks(
             text, lines, line_hits, result).items():
         if field in result and result[field]["value"]:
@@ -1104,18 +990,16 @@ def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
         result[field] = {"value": value, "confidence": conf, "source": "ocr",
                          "method": method, "evidence": ""}
 
-    # area unit sanity: keep unit only when an area exists
     if result.get("area_unit") and not result.get("plot_area"):
         result.pop("area_unit", None)
 
-    # ---- learned corrections (field-specific, similarity gated) ----------
     if apply_learning:
         for field in list(result):
             if field not in LEARNABLE_FIELDS or not result[field]["value"]:
                 continue
             try:
                 corrected = learn.apply_and_count(field, result[field]["value"])
-            except Exception:            # DB unavailable -> never break OCR
+            except Exception:
                 corrected = None
             if corrected and corrected != result[field]["value"]:
                 result[field]["value"] = corrected
@@ -1145,7 +1029,7 @@ def _finalise(result: dict, threshold: float, required) -> dict:
         item.setdefault("evidence", "")
         item.setdefault("source", "ocr")
         out[field] = item
-    # required-but-missing always needs review
+
     for field in required:
         if not out[field]["value"]:
             out[field]["needs_review"] = True
