@@ -1,373 +1,427 @@
-# Intelligent Land Record Digitization & Validation System (ILRDVS)
+# ILRDVS — Intelligent Land Record Digitization & Validation System
 
-### Project Report — AI-powered digitization of legacy land records for the DILRMP ecosystem
+An AI-powered Django platform that converts scanned land registers, Khatauni/RoR
 
-> **Reference implementation:** Django + Bhashini ULCA API (primary OCR) + Tesseract (fallback) + OpenCV + NLP extraction,
+forms, cadastral printouts and legacy PDFs into **structured, validated,
 
-> with gamma-correction image enhancement, confidence scoring, human-assisted
+audit-trailed digital records**, aligned with the objectives of the
 
-> verification, self-learning corrections, audit trails and an integration API.
+**Digital India Land Records Modernization Programme (DILRMP)**.
+
+Primary languages: **English, Hindi, Tamil, Telugu, Kannada, Malayalam**
+
+(plus Bengali, Gujarati, Marathi, Punjabi where packs/API support allow).
+
+```text
+
+  scan/PDF
+
+      │
+
+      ▼
+
+  per-page quality assessment (cheap)
+
+      │
+
+      ▼
+
+  stamp/seal detection (always; conservative)
+
+      │
+
+      ▼
+
+  adaptive preprocessing
+
+      • minimal  — clean / born-digital pages
+
+      • moderate — mild fade / noise / skew
+
+      • heavy    — dark, noisy, ruled, difficult scans
+
+      │
+
+      ▼
+
+  OCR: Bhashini ULCA (primary) → Tesseract → PaddleOCR (fallback)
+
+      │  + OCR rescue if enhance yields near-empty text
+
+      ▼
+
+  NLP field extraction (labels, layout, table cells, learning memory)
+
+      │
+
+      ▼
+
+  validation (business rules, stamp issues, duplicates, state↔district)
+
+      │
+
+      ▼
+
+  HITL verification console → audited digital register
+
+1. Quick start
+
+Bhashini setup (primary OCR engine)
+
+Engine order (settings.OCR_ENGINE_PRIORITY):
+
+Bhashini → Tesseract → PaddleOCR
+
+If Bhashini keys are missing or a call fails, the pipeline falls through
+
+automatically. Tesseract needs no key.
+
+Bash
+
+cp .env.example .env
+
+# set:
+
+#   BHASHINI_USER_ID=...
+
+#   BHASHINI_API_KEY=...
+
+#   BHASHINI_PIPELINE_ID=...   # if required by your ULCA app
+
+Or export env vars / edit config/settings.py. Blank keys = skip Bhashini.
+
+Tip: On upload, pin language (eng, hin, tam, tel, kan, mal)
+
+instead of auto for faster, more stable runs.
+
+Adaptive preprocessing
+
+Each page is assessed independently (records/pipeline/quality.py):
+
+Level   When    What runs
+
+minimal Clean / digital e-Services style pages  Resize, grayscale, optional stamp inpaint, light deskew
+
+moderate    Mild quality issues + gamma, light denoise, CLAHE, deskew (no hard binarize)
+
+heavy   Dark, noisy, faded, difficult scans Full existing pipeline: gamma, NL-Means, CLAHE, binarize, despeckle, de-rule, deskew
+
+Stamp detection always runs. A real seal can upgrade minimal → moderate
+
+so ink can be inpainted. False stamp storms are capped (see Stamp section).
+
+If OCR after enhance returns almost no words, OCR rescue retries
+
+minimal/original grayscale so a bad enhance cannot leave a blank record.
+
+Stamp / seal handling
+
+Conservative detector: prefers coloured office ink; ignores table rules and body text.
+
+Max plausible stamps guard (drops absurd counts like “112 stamps” on clean forms).
+
+Issues: STAMP_OVERLAP, STAMP_MULTIPLE, STAMP_MISSING (softened for digital e-signed cues).
+
+Console log: Stamp=YES / Stamp=NO means detector ran; NO = zero seals found, not “feature off”.
+
+Multi-page PDFs
+
+OCR_MAX_PAGES (default 20, env-overridable). Each page is assessed and
+
+OCR’d separately; fields merge into one LandRecord. Document.page_count is
+
+the true source count; processed_page_count is how many pages were processed.
+
+System dependencies
+
+Bash
+
+sudo apt-get install -y tesseract-ocr \
+
+  tesseract-ocr-hin tesseract-ocr-ben tesseract-ocr-tam tesseract-ocr-tel \
+
+  tesseract-ocr-kan tesseract-ocr-mal tesseract-ocr-guj tesseract-ocr-mar \
+
+  tesseract-ocr-pan
+
+# optional better LSTM models:
+
+# ./scripts/install_tessdata_best.sh eng hin tam tel kan mal ...
+
+# optional third OCR engine:
+
+pip install paddleocr paddlepaddle
+
+Python setup
+
+Bash
+
+cd landrecords
+
+pip install -r requirements.txt
+
+python manage.py migrate
+
+python manage.py seed_demo
+
+python manage.py runserver 0.0.0.0:8000
+
+Account Password    Role
+
+admin   admin123    Administrator
+
+operator1   operate123  Digitization Operator
+
+verifier1   verify123   Verification Officer
+
+viewer1 view123 Viewer
+
+Bash
+
+python manage.py test
+
+# optional ground-truth eval if fixtures present:
+
+# python manage.py eval_khatauni_gt
+
+Pre-seed correction memory (deterministic cache, not model training):
+
+Bash
+
+python manage.py seed_demo --reset --train-passes 10
+
+2. What to try
+
+Dashboard — KPIs, confidence, issues, learning log.
+
+Clean digital Patta/RoR PDF — should often use minimal/moderate,
+
+Stamp=NO, non-zero word counts; Enhanced should still look readable.
+
+Dark/faded scan — should escalate to heavy.
+
+Stamp on text — real coloured seals may show Stamp=YES and overlap rules.
+
+Verification queue — correct fields; corrections enter learning memory.
+
+Duplicate plot — same survey/khasra + village + district flags duplicate.
+
+Upload with pinned language and gamma auto/manual/off.
+
+API under /api/v1/ with session or X-API-Key: lr-demo-key-2026.
+
+Pipeline timing log (server console)
+
+text
+
+[ILRDVS] p1 Mode=moderate Stamp=NO Pre=2248ms OCR=33660ms Words=153 Conf=67.5%
+
+Mode — preprocess level used (or … (rescue) if OCR rescue won).
+
+Stamp=YES/NO — seals found on that page (feature is always on).
+
+Pre / OCR — local CV vs OCR engine time (Bhashini is often the slow part).
+
+Words / Conf — OCR yield for that page.
+
+3. Integration API
+
+Base: /api/v1/ — browser session or header X-API-Key: lr-demo-key-2026
+
+(settings.API_KEYS).
+
+Method  Endpoint    Purpose
+
+GET /api/v1/stats/  KPIs
+
+GET/POST    /api/v1/documents/  list / upload + process
+
+GET /api/v1/documents/<id>/ status, OCR, record
+
+POST    /api/v1/documents/<id>/reprocess/   re-run pipeline
+
+GET /api/v1/records/    search
+
+GET /api/v1/records/<id>/   record + confidences + issues
+
+POST    /api/v1/records/<id>/verify/    verify/edit fields
+
+GET /api/v1/schema/fields/  canonical field schema
+
+Bash
+
+curl -H "X-API-Key: lr-demo-key-2026" \
+
+  -F file=@khatauni_scan.pdf -F language=eng -F district=Chennai -F gamma=auto \
+
+  http://localhost:8000/api/v1/documents/
+
+4. Project layout
+
+text
+
+landrecords/
+
+├── config/                 # settings, urls, wsgi
+
+├── records/
+
+│   ├── models.py
+
+│   ├── constants.py
+
+│   ├── views.py / api.py
+
+│   ├── pipeline/
+
+│   │   ├── quality.py      # cheap per-page quality → minimal|moderate|heavy
+
+│   │   ├── stamps.py       # seal detection + validation issues
+
+│   │   ├── preprocess.py   # minimal / moderate / heavy enhance
+
+│   │   ├── bhashini_ocr.py # ULCA Bhashini client
+
+│   │   ├── ocr.py          # engine chain + language handling
+
+│   │   ├── extract.py      # NLP / layout field extraction
+
+│   │   ├── table_extract.py
+
+│   │   ├── indic_labels.py
+
+│   │   ├── validate.py
+
+│   │   ├── learn.py
+
+│   │   └── service.py      # orchestration + OCR rescue + timing
+
+│   └── management/commands/
+
+├── tools/                  # nlp_bench, e2e_bench (if present)
+
+├── media/
+
+├── static/
+
+├── templates/
+
+├── PROJECT_REPORT.md
+
+└── requirements.txt
+
+5. Important settings (config/settings.py)
+
+Setting Role
+
+OCR_ENGINE_PRIORITY ["bhashini", "tesseract", "paddle"]
+
+BHASHINI_*  ULCA credentials and timeouts
+
+OCR_CONFIDENCE_THRESHOLD    Default 0.75 → HITL review
+
+OCR_MAX_PAGES   Cap pages processed per document
+
+OCR_LANGUAGES   Includes mal (Malayalam) and other Indic packs
+
+ADAPTIVE_PREPROCESS_ENABLED Per-page minimal/moderate/heavy routing
+
+PREPROCESSING_CONFIG    Tunable quality thresholds
+
+STAMP_* Stamp area ratios, overlap IoU, cert-block policy
+
+PIPELINE_DEBUG  Optional per-stage debug images under media/debug/
+
+API_KEYS    Machine clients
+
+Speed while testing: pin language; lower OCR_MAX_PAGES; or temporarily
+
+set OCR_ENGINE_PRIORITY = ["tesseract"] to skip Bhashini latency.
+
+Accuracy mode: Bhashini on + pinned language.
+
+6. Validation rules (selected)
+
+Code    Meaning
+
+REQUIRED_FIELD  Mandatory land fields empty
+
+ID_FORMAT / AREA_* / PINCODE_* / DATE_* Format and range checks
+
+STATE_DISTRICT  District vs state master list
+
+DUPLICATE_PLOT  Same plot id + village + district
+
+STAMP_OVERLAP   Seal overlaps OCR text
+
+STAMP_MULTIPLE  Several seals (warning)
+
+STAMP_MISSING   No seal and no cert cues (skipped for many digital e-sign patterns)
+
+7. Notes
+
+Demo corpus in media/seed/ is synthetic; real pipeline results are not hard-coded.
+
+SQLite for demo; use PostgreSQL/PostGIS in production.
+
+Pipeline is synchronous per upload (multi-page = sum of page times).
+
+For bulk volume, wrap service.process_document with Celery/RQ.
+
+Upload UI dedupes concurrent “already PROCESSING” same file for the same user
+
+(avoids duplicate jobs from double-click / retries).
+
+Sensitive test files: keep under a gitignored path (e.g. tests/fixtures/sensitive/).
+
+Field accuracy depends on document quality, language pin, and OCR engine
+
+availability. Measure on your own ground-truth set rather than assuming a
+
+fixed percentage.
+
+8. Troubleshooting
+
+Symptom Likely cause    What to check
+
+Enhanced white / 0 words    Heavy CV on clean PDF (old path)    quality.py, preprocess_minimal, service OCR rescue
+
+“100+ stamps”   Old dark-ink stamp OR   Updated stamps.py (colour-first + max-stamp guard)
+
+Very slow multi-page    Bhashini per page   Console OCR=…ms; pin lang; raise patience or use Tess for smoke tests
+
+Many PROCESSING rows    Double upload   Delete stuck rows; use single upload; dedupe in views
+
+Empty district/village  No OCR text yet Fix OCR first; labels already include Taluk/Patta/District
+
+Clear stuck jobs (example):
+
+Bash
+
+python manage.py shell -c "from records.models import Document; Document.objects.filter(status='PROCESSING').delete()"
+
+text
 
 ---
 
-## 1. Background and Problem Statement
+### Files checklist (for your own audit)
 
-Land records form the backbone of land administration, property ownership, taxation,
+| File | In README? | Purpose |
 
-land acquisition, dispute resolution and infrastructure planning. Across India, a
+|------|------------|---------|
 
-significant portion of historical land records continues to exist as handwritten
+| `stamps.py` | Yes | Stamp=NO/YES behaviour |
 
-registers, scanned documents, cadastral maps and legacy PDFs maintained at various
+| `quality.py` | Yes | Adaptive levels |
 
-administrative levels. These records suffer from poor image quality, inconsistent
+| `preprocess.py` | Yes | minimal / moderate / heavy |
 
-formats, faded text, damaged pages, multiple regional languages and handwritten
+| `service.py` | Yes | Orchestration + rescue + log line |
 
-annotations — making manual digitization slow, costly and error-prone, and blocking
+| `ocr.py` / `bhashini_ocr.py` | Yes | Engine chain |
 
-integration with modern Land Records Management Systems (LRMS), GIS platforms and
+| `extract.py` / `validate.py` / `views.py` | Yes | Downstream |
 
-citizen-centric services under DILRMP.
+| `settings.py` | Yes | Knobs |
 
-## 2. Proposed Solution
-
-An intelligent AI-based platform that automatically extracts structured information
-
-from unstructured scans, classifies it into canonical land-record fields
-
-(owner, survey / khasra / khata numbers, plot area, village, tehsil, district,
-
-classification, ownership, mutation and registration details), validates it with
-
-business rules and cross-database checks, and routes only genuinely uncertain
-
-records to human verification officers — with every correction fed back to improve
-
-the models over time.
-
-## 3. Scope of Study
-
-| # | Scope Area | In Scope (this implementation) | Techniques Used | Boundary / Future Extension |
-
-|---|---|---|---|---|
-
-| 1 | Document ingestion | Scanned PDFs, JPG/PNG/TIFF/BMP/WEBP scans & photos; multi-page PDFs (first 5 pages) | PyMuPDF rasterization, OpenCV decode | Bulk watch-folders, scanner (TWAIN/SANE) integration |
-
-| 2 | Image enhancement | Stamp/seal detection and ink inpainting, auto/manual **gamma correction**, denoising (NL-Means), CLAHE local contrast, adaptive binarization, table-rule removal, despeckling, deskew | OpenCV pipeline with stamp masking, Telea inpainting and per-document diagnostics | GAN/deep-learning based restoration, bleed-through removal |
-
-| 3 | OCR | Printed text in English + Hindi, Bengali, Tamil, Telugu, Kannada, Gujarati, Marathi, Punjabi; auto script detection; word-level confidence | Free & open-source **Tesseract 5** (`pytesseract`), PSM auto-retry | Handwriting (HWTR/TrOCR), layout-aware LSTM models, fine-tuned Indic packs |
-
-| 4 | Field extraction | 18 canonical fields (owner, father, survey/khasra/khata, area+unit, village, tehsil, district, state, PIN, classification, ownership, mutation no./date, registration no./date) | Rule-based NLP: multilingual label spotting, layout geometry, typed parsers (numbers, units, dates, PIN) | NER with IndicBERT/LLMs, layout transformers (LayoutLM), geocoding |
-
-| 5 | Validation | Mandatory-field checks, ID/area/PIN/date formats, plausible ranges, state↔district master cross-check, **duplicate detection** (plot+village+district) | Deterministic rules engine; stamp/seal checks and severity levels | Live API cross-verification with state LRMS/DILRMP services, Aadhaar/UIDAI eKYC-based owner checks |
-
-| 6 | Human-in-the-loop | Verification queue for low-confidence records, side-by-side console, approve/reject with notes | Role-gated Django views; per-field confidence surfaces | Two-person rule, supervisor escalation, sampling-based QC |
-
-| 7 | AI learning | Correction memory (fuzzy auto-application on later documents), usage counters, learning log on dashboard | `difflib` similarity ≥ 0.86, per-field memories | Online model retraining, active-learning queues |
-
-| 8 | Interoperability | JSON REST-style API with API-key auth; CSV export; canonical field schema endpoint | Django views; versioned `/api/v1/` | DILRMP/Bhulekh connectors, WFS/WMS (GeoServer), Bhuvan/NIC APIs, STAC for imagery |
-
-| 9 | Security & audit | RBAC (Admin/Operator/Verifier/Viewer), immutable audit trail with IP, CSRF, secure cookies in prod | Django auth + custom profile roles | OAuth2/OIDC (NIC SSO), field-level encryption, data-residency controls |
-
-| 10 | Analytics | Dashboards: documents processed, extraction confidence, validation status, pending cases, error mix, state/district-wise progress, language mix | Chart.js (vendored), aggregate SQL | GIS map widgets, SLA monitoring, per-tehsil drill-downs |
-
-| 11 | Repository | Secure document store with metadata, pipeline logs, processed-image lineage | Django FileField storage + JSON metadata | Object storage (S3/MinIO), WORM retention, DMS standards (eGazette/DigiLocker linking) |
-
-| 12 | Performance | Per-document synchronous processing (~3–8 s/page CPU) | NumPy/OpenCV vectorisation | Celery/RQ workers, GPU OCR nodes, horizontal scaling |
-
-## 4. System Architecture
-
-```
-
-┌────────────┐   ┌────────────────────────  DJANGO APPLICATION  ───────────────────────────┐
-
-│ Web / API  │   │                                                                          │
-
-│ clients    │──▶│  RBAC & Auth ── Upload ──▶ PIPELINE SERVICE                               │
-
-└────────────┘   │                    │      ├─ Preprocessor (γ-correct, denoise, CLAHE,    │
-
-                 │                    ▼      │   binarize, de-rule, deskew)                 │
-
-                 │             Document store│                                             │
-
-                 │                    │      ├─ OCR engine (Bhashini primary → Tesseract fallback, Indic + English,     │
-
-                 │                    ▼      │   word confidences, script detection)        │
-
-                 │             ┌─────────┐   │                                             │
-
-                 │             │ Audit   │───┼─ Field extractor (labels, geometry, typed)  │
-
-                 │             │ trail   │   │                                             │
-
-                 │             └─────────┘   ├─ Learning memory (correction fuzzy-match)   │
-
-                 │                    │      │                                             │
-
-                 │                    ▼      ├─ Validator (business rules, cross-checks,   │
-
-                 │             Records DB ◀──│   duplicates)                                │
-
-                 │                    │      │                                             │
-
-                 │                    ▼      └─ HITL verification console                  │
-
-                 │             Dashboards / CSV / /api/v1/                                  │
-
-                 └──────────────────────────────────────────────────────────────────────────┘
-
-```
-
-## 5. Module-wise Data Flow
-
-Stamp detection (pipeline/stamps.py) — detects circular seals and rectangular stamp-like regions using morphological closing and contour analysis, and generates an ink mask.
-
-Enhancement (pipeline/preprocess.py) — grayscale → Telea inpainting on the stamp mask to soften obstructing ink → auto gamma → NL-Means denoise → CLAHE → adaptive Gaussian threshold → connected-component despeckle → ruled-line removal → deskew. Diagnostics are stored per document.
-
-   (`γ = log(mean)/log(0.5)`, clamped 0.4–2.8) → NL-Means denoise → CLAHE →
-
-   adaptive Gaussian threshold → connected-component despeckle → ruled-line
-
-   removal via morphological opening + inpainting → min-area-rect deskew
-
-   (±0.25° trigger).  Diagnostics (gamma used, brightness before/after, skew,
-
-   per-step log, elapsed ms) are stored per document and shown in the UI.
-
-2. **OCR (`pipeline/ocr.py`)** — Tesseract with paired Indic–English models,
-
-   PSM-4 primary with automatic PSM-3 rescue on suspiciously low word counts,
-
-   Unicode-script language detection, word-level confidence capture.
-
-3. **Information extraction / NLP (`pipeline/extract.py`)** — a seven-stage
-
-   layout-aware extractor (details in §5a).
-
-4. **Validation (`pipeline/validate.py`)** — 7 rule classes (see §7).
-
-5. **Correction memory (`pipeline/learn.py`)** — officer corrections are
-
-   memorised **per field** and re-applied to later documents when the new OCR
-
-   value is an exact or very close (≥0.88) match of a remembered raw value.
-
-   Identifiers, areas, PIN codes and dates are deliberately *not* learnable,
-
-   and a replacement that is not an OCR-repair of the same entity
-
-   (similarity < 0.55) is never generalised.  It is a deterministic,
-
-   auditable correction cache — not a trained model — and the UI says so.
-
-6. **Verification (`views.verify_record`)** — editable per-field console with
-
-   confidence bars, original-OCR recall chips, issue alerts, approve/reject.
-
-### 5a. Extraction (NLP) pipeline in detail
-
-| Stage | What happens | Code |
-
-|---|---|---|
-
-| 1. Normalisation | NFKC folding, OCR confusable repair (`0→o, 1→l, 5→s, |→l …`) applied to *label candidates only*, never to stored values | `_fold`, `_clean_text` |
-
-| 2. Exact label matching | ~230 aliases across 20 fields (English, transliterated and Indic: *Owner Name / Khatedar / Patta Holder / Land Owner / मालिक का नाम / பட்டாதாரர்*) | `LABELS`, `ALIAS_INDEX` |
-
-| 3. Fuzzy label matching | Token-window similarity (1–4 tokens) in two modes: whole-window ratio and word-aligned ratio, so `0wner Nane`, `Ownr Name`, `Villaqe`, `Distrist`, `Reglstration No` still resolve.  Longer words that merely *contain* an alias (`Tehsildar`, `Khatauni`) are penalised | `_match_alias` |
-
-| 4. Contextual / layout analysis | Value is taken (a) inline to the right of the label and **cut at the next label on the line** – so `District: Chennai Village: Sholinganallur` can never bleed, (b) from the next table column on the same row band using OCR bounding boxes, or (c) from the line below the label when the form is stacked | `_inline_candidate`, `_column_candidate`, `_below_candidate` |
-
-| 5. Entity / pattern parsing | Typed parsers: plot ids (`123`, `123/4`, `123-A`, `123/4A`, `S.No. 123/4`), areas + unit normalisation (acre/acres, hectare, sq.ft, sq ft, cents, bigha, guntha, kanal…), dates (`12/05/2024`, `12-05-2024`, `12.05.2024`, `12 May 2024`, `2024-05-12` → `DD/MM/YYYY`), PIN codes, names (boiler-plate, enum and character-soup rejection), free text.  Label-free fallbacks: gazetteer state/district lookup, PIN pattern, number-with-unit, date on the identifier's line | `parse_*`, `_pattern_fallbacks` |
-
-| 6. Confidence scoring | `OCR word confidence × label-match quality × value plausibility × position prior`, per field, with the winning candidate chosen by the same product.  Every field also stores a human-readable `method` (e.g. *"fuzzy label 'owner name' (0.89) + value on line below label"*) and the OCR line it came from | `_score`, `FieldExtraction.method` |
-
-| 7. Hand-off to validation | Anything below `OCR_CONFIDENCE_THRESHOLD` (0.75) or missing-but-required is flagged `needs_review` and enters the human queue instead of being silently trusted | `_finalise`, `validate.py` |
-
-Measured on the bundled corpora: **103/103 fields** on the synthetic OCR-text
-
-regression corpus (`records/pipeline/nlp_corpus.py`, 25 cases) and **14/14
-
-fields on every legible rendered scan** in the end-to-end bench
-
-(`tools/e2e_bench.py`); overall 131/168 including the deliberately destroyed
-
-and Devanāgarī scans, where the losses are OCR character errors (all of them
-
-flagged for review, none silently stored).
-
-## 6. Suggested Components-wise Technology
-
-| # | Component | This Implementation (free / open-source) | Production-grade Alternatives |
-
-|---|---|---|---|
-
-| 1 | **Frontend** | Django Templates + custom CSS + vanilla JS | React/Next.js, Angular |
-
-| 2 | **Charts / dashboards** | Chart.js (vendored, offline-safe) | Apache ECharts, Metabase/Superset, Grafana |
-
-| 3 | **Web framework / API** | Django 5/6 + json API (this project) | Django + Django REST Framework, FastAPI |
-
-| 4 | **Image preprocessing** | OpenCV + NumPy (γ-correction, CLAHE, NLM denoise, morph ops) | OpenCV + scikit-image; deep restoration (Real-ESRGAN) |
-
-| 5 | OCR engine | Bhashini ULCA API (primary) + Tesseract 5/pytesseract fallback; Indic language support | PaddleOCR, EasyOCR; commercial: Azure/Google/AWS Textract |
-
-| 6 | **Indic NLP** | Rule + geometry based extraction; fuzzy learning (`difflib`) | IndicBERT, IndicNER, spaCy + custom rules, LLM extraction (Llama/GPT) |
-
-| 7 | **Handwritten Text Recognition** | — (roadmap) | TrOCR, HWTR-CRNN, Google Document AI |
-
-| 8 | **Relational DB** | SQLite (demo) → PostgreSQL | PostgreSQL + partitioning for national scale |
-
-| 9 | **GIS / cadastral maps** | metadata hooks (state/district) | PostGIS + GeoDjango, GeoServer, QGIS, MapServer, Leaflet/MapLibre GL |
-
-| 10 | **Task queue** | synchronous (demo) | Celery + Redis/RabbitMQ, Dramatiq |
-
-| 11 | **Document store** | filesystem (`media/`) | S3/MinIO, WORM compliance storage |
-
-| 12 | **Authentication** | Django auth + profile roles + API key header | OAuth2/OIDC (Keycloak), eParivartan/NIC SSO |
-
-| 13 | **Logging / audit** | `AuditLog` model (immutable) | ELK/OpenSearch, audit-log services |
-
-| 14 | **Deployment** | `runserver` (demo) | Gunicorn/Uvicorn + Nginx, Docker, Kubernetes |
-
-| 15 | **Monitoring** | pipeline timings per document | Prometheus + Grafana, Sentry |
-
-| 16 | **Integration targets** | `/api/v1/*` for LRMS/DILRMP/GIS | DILRMP NIC connectors, Bhuvan, DigiLocker, eDistrict |
-
-## 7. Validation Rule Catalogue
-
-| Rule code
-
-Check
-
-Severity
-
-STAMP_OVERLAP
-
-Official seal overlaps ≥ 3 OCR word boxes (IoU > 0.15)
-
-error
-
-STAMP_MISSING
-
-No seal detected AND no certification signature block found
-
-error
-
-STAMP_MULTIPLE
-
-3 or more seal-like regions detected
-
-warning
-
-|---|---|---|
-
-| `REQUIRED_FIELD` | owner, survey/khasra, village, district, plot area present | error |
-
-| `ID_FORMAT` | plot identifiers match digit/letter/slash-dash grammar | warning |
-
-| `AREA_RANGE` | area normalised to hectares within plausible bounds | error |
-
-| `AREA_UNIT` | unit recognised (ha/acre/sq m/bigha/biswa/guntha/cent…) | warning |
-
-| `PINCODE_FORMAT` | valid 6-digit Indian PIN | error |
-
-| `DATE_FORMAT` / `DATE_FUTURE` | DD/MM/YYYY parse; no future mutation/registration dates | error |
-
-| `STATE_DISTRICT` | district belongs to state per reference master data | warning |
-
-| `DUPLICATE_PLOT` | same plot id + village + district already digitized | error |
-
-## 8. Data Model (summary)
-
-`UserProfile(role)` — RBAC over Django users.
-
-`Document` — file, enhanced image, OCR text/confidence/engine/language, preprocessing
-
-diagnostics, pipeline log, status (`UPLOADED→PROCESSING→PROCESSED/FAILED`).
-
-`LandRecord` — the 18 canonical fields + `overall_confidence`, `status`
-
-(`PENDING/VERIFIED/REJECTED`), `is_duplicate`, verifier linkage.
-
-`FieldExtraction` — per-field value, confidence, provenance (`ocr`/`learned`/`manual`),
-
-review flag.  `ValidationIssue` — rule/severity/message/resolved.
-
-`LearnedCorrection` — field, raw → corrected memory with usage counters.
-
-`AuditLog` — actor, action, object, detail, IP, timestamp (immutable).
-
-## 9. API Examples
-
-```bash
-
-# upload + auto-digitize a faded Hindi scan
-
-curl -H "X-API-Key: lr-demo-key-2026" \
-
-     -F file=@ror_scan.pdf -F language=hin -F state="Madhya Pradesh" \
-
-     -F district=Bhopal -F gamma=auto \
-
-     http://HOST/api/v1/documents/
-
-# poll processing / fetch structured record
-
-curl -H "X-API-Key: lr-demo-key-2026" http://HOST/api/v1/documents/7/
-
-# search verified records for a plot
-
-curl -H "X-API-Key: lr-demo-key-2026" \
-
-     "http://HOST/api/v1/records/?district=Varanasi&survey_number=331/2"
-
-# officer-side correction + verification from a back-office system
-
-curl -H "X-API-Key: lr-demo-key-2026" -H "Content-Type: application/json" \
-
-     -X POST http://HOST/api/v1/records/7/verify/ \
-
-     -d '{"fields":{"owner_name":"Geeta Devi","survey_number":"47/2"},"note":"register 12/44"}'
-
-```
-
-## 10. Security, Privacy & Governance
-
-- Role-based access control (Admin / Operator / Verifier / Viewer) with friendly
-
-  in-app guard rails; Django admin reserved for superusers.
-
-- Full audit trail (uploads, pipeline runs, every field edit, verifications,
-
-  rejections, exports, API calls) with actor + IP + timestamp.
-
-- CSRF protection, auth-required pages, API keys for machine consumers;
-
-  production hardening path documented (TLS, OIDC, WORM storage, PII minimisation).
-
-## 11. Demonstrated Outcomes (demo corpus)
-
-The pipeline processes synthetic scans covering clean, dark, faded, noisy and damaged documents in English and Hindi, across PDF and image inputs.
-
-Bhashini is the primary OCR path, with local Tesseract available as a fallback when the API is unavailable or an OCR attempt fails.
-
-Heavy official seals are handled before OCR through stamp/seal detection, ink masking and Telea inpainting, while validation can flag stamp overlap or missing certification evidence.
-
-Exact-match extraction is demonstrated on clean forms; corrupted or uncertain OCR is surfaced through confidence scoring and routed to targeted human review rather than being silently trusted.
-
-Duplicate rescans can be linked and quarantined, and verifier corrections can be retained in the correction-memory log for later applications.
-
-## 12. Limitations & Future Work
-
-Handwritten annotations (TrOCR/HTR), difficult or partially obscured stamp/seal cases, full cadastral-map vectorization (GeoDjango +
-
-deep segmentation), live state LRMS master-data calls, async worker farm, and
-
-model fine-tuning on state-specific form templates are the natural next steps;
-
-the pipeline seams (`service.process_document`, `pipeline.*`) are already factored
-
-for those swaps.
+| `PROJECT_REPORT.md` | Mention only | Optional separate doc |
