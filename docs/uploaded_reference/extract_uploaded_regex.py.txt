@@ -1,0 +1,462 @@
+"""
+NLP field-extraction layer.
+
+Combines multilingual label spotting (English + Indic languages), layout
+awareness (word geometry from OCR), typed parsing (numbers, dates, units)
+and the learned-correction memory to turn raw OCR words into structured
+land-record fields, each with a confidence score.
+"""
+from __future__ import annotations
+
+import re
+from statistics import mean
+
+from django.conf import settings
+
+from records.constants import FIELD_KEYS, LEARNABLE_FIELDS
+from . import learn
+
+# ---------------------------------------------------------------------------
+# Multilingual label catalogue
+# ---------------------------------------------------------------------------
+ENG_LABELS = {
+    "owner_name": [r"name\s*of\s*(?:the\s*)?(?:owner|tenant|holder)",
+                   r"owner(?:'s)?\s*name", r"khatedar(?:\s*name)?",
+                   r"khatadar", r"pattedar", r"raiyat(?:\s*name)?",
+                   r"account\s*holder"],
+    "father_name": [r"father(?:'s)?\s*name", r"father", r"husband(?:'s)?\s*name",
+                    r"s/\s*o", r"w/\s*o", r"d/\s*o"],
+    "survey_number": [r"\bsurvey\s*(?:no|number|num)\.?[:\s]", r"\bsurvey\b",
+                      r"\bplot\s*(?:no|number)\.?", r"\bgat\s*(?:no|number)\.?"],
+    "khasra_number": [r"\bkhasra\s*(?:no|number)\.?", r"\bkhasra\b"],
+    "khata_number": [r"\bkhata\s*(?:no|number)\.?", r"(?<!kha)\bkhata\b",
+                     r"\bkhewat\s*(?:no|number)\.?", r"\baccount\s*(?:no|number)\.?"],
+    "plot_area": [r"total\s*area", r"area", r"rakba", r"extent"],
+    "village": [r"village", r"mauza", r"gram", r"gaon"],
+    "tehsil": [r"tehsil(?!dar)", r"tahsil", r"taluka?", r"anchal"],
+    "district": [r"district(?!s?\b\s*(?:court|magistrate))", r"dist\.?", r"zila"],
+    "state": [r"state(?!\s+land)(?!\s+revenue)", r"province"],
+    "pincode": [r"pin\s*code", r"pincode", r"\bpin\b"],
+    "land_classification": [r"land\s*(?:type|classification|class)",
+                            r"classification", r"soil\s*class"],
+    "ownership_type": [r"ownership\s*type", r"ownership", r"tenure(?:\s*type)?"],
+    "mutation_number": [r"mutation\s*(?:no|number)\.?", r"mutation",
+                        r"dakhil\s*kharij(?:\s*no)?\.?"],
+    "registration_number": [r"registration\s*(?:no|number)\.?",
+                            r"registry\s*(?:no|number)\.?",
+                            r"document\s*(?:no|number)\.?", r"regd?\.?\s*no\.?"],
+}
+
+#Longestphrase first: "मालिक का नाम" must be swallowed whole, otherwise
+#thetail of matched text keeps "का नाम" and pollutes the value.
+INDIC_LABELS = {
+    "owner_name": [
+        # Hindi
+        "मालिककानाम","खातेदार का नाम", "स्वामी का नाम", "मालिक", "खातेदार", "स्वामी", "धारक का नाम",
+        # Bengali
+        "মালিকেরনাম", "খাতাদারের নাম", "মালিকের", "মালিক",
+        # Tamil
+        "உரிமையாளர்   பெயர்" , "பட்டாதாரர் பெயர்" , "பட்டாதாரரின் பெயர்" , "உரிமையாளர்" , "பட்டாதாரர்" ,
+        # Telugu
+        "యజమాని  పేరు", "ఖాతాదారు పేరు", "యజమాని", "ఖాతాదారు",
+        # Malayalam
+        "ഉടമയുടെ  പേര്" , "ഭൂവുടമയുടെ പേര്" , "ഉടമ", "ഭൂവുടമ",
+        # Kannada
+        "ಮಾಲೀಕರ  ಹೆಸರು" , "ಖಾತೆದಾರರ ಹೆಸರು" , "ಮಾಲೀಕ", "ಖಾತೆದಾರ",
+        # Gujarati
+        "માલિકનું નામ", "ખાતેદારનું નામ", "માલિક", "ખાતેદાર",
+        # Marathi
+        "मालकाचे नाव", "खातेदाराचे नाव", "मालक", "खातेदार",
+        # Punjabi
+        "ਮਾਲਕਦਾਨਾਮ" , "ਖਾਤੇਦਾਰ ਦਾ ਨਾਮ", "ਮਾਲਕ", "ਖਾਤੇਦਾਰ",
+    ],
+    "father_name": [
+        "पिता का नाम", "पति का नाम", "पिता", "पति", "वडिलांचे नाव", "पतीचे नाव",
+        "বাবার নাম", "পিতার নাম", "স্বামীর নাম", "தந்தையின் பெயர்" , "கணவர் பெயர்" ,
+                   "భర్త
+        "తండ్రి పేరు", పేరు","അച്ഛന്റെ പേര്", "ഭർത്താവിന്റെപേര്" ,
+        "ತಂದೆಯ ಹೆಸರು" , "ಗಂಡನ ಹೆಸರು", "પિતાનું નામ", "પતિનું નામ", "ਪਿਤਾ ਦਾ ਨਾਮ" , "ਪਤੀ ਦਾ ਨਾਮ" ,
+    ],
+    "survey_number": [
+        "सर्वे नंबर", "सर्वे क्रमांक", "गट क्रमांक", "गट नंबर", "भूमि क्रमांक", "सर्वे",
+        "জরিপ নম্বর", "জরিপ নং", "சர்வே எண்", "சர்வே எண்ண" , "సర్వే నంబర్", "సర్వే నం",
+        "സർവേ   നമ്പർ" , "സർവേനം","ಸರ್ವೆಸಂಖ್ಯೆ", "ಸರ್ವೆ ನಂ", "સર્વે નંબર", "સર્વે નં" ,
+        "सर्वे नंबर", "सर्वे क्र." , "ਸਰਵੇ ਨੰਬਰ", "ਸਰਵੇ ਨੰ" ,
+    ],
+    "khasra_number": [
+        "खसरानंबर", "खसरा क्रमांक", "खसरा", "খসড়া নম্বর", "খসরা নম্বর",
+        "கச்ராஎண்", "கசரா எண்", "ఖస్రా నంబర్", "ఖస్రా నం", "ഖസ്ര നമ്പർ", "ഖസ്ര നം",
+        "ಖಸ್ರಾ ಸಂಖ್ಯೆ", "ખસરા નંબર", "खसरा नंबर", "ਖਸਰਾ ਨੰਬਰ",
+    ],
+    "khata_number": [
+        "खाता नंबर", "खाता क्रमांक", "खाता", "খাতা নম্বর", "খাতা নং", "கணக்கு எண்", "காத்தா எண்" ,
+        "ఖాతానంబర్","ఖాతానం", "ഖാത്ത നമ്പർ","ഖാത  നമ്പർ","ಖಾತಾಸಂಖ್ಯೆ", "ખાતા નંબર", "खाता क्रमांक", "ਖਾਤਾ ਨੰਬਰ",
+    ],
+    "plot_area": [
+        "क्षेत्रफल", "रकबा", "क्षेत्र", "জমির পরিমাণ", "জমির ক্ষে ত্রফল" , "பரப்பளவு" , "நிலப்பரப்பு" ,
+        "విస్తీర్ణం", విస్తీర్ణం",
+                "భూమి       "വിസ്തീർണ്ണം" , "ഭൂവിസ്തീർണ്ണം" , "ವಿಸ್ತೀರ್ಣ ", "જમીન વિસ્તાર", "क्षेत्रफळ", "जमिनीचे क्षेत्रफळ", "ਜ਼ਮੀਨ ਦਾ ਰਕਬਾ",
+    ],
+    "village": [
+        "ग्राम", "गाँव", "गाव", "मौजा", "গ্রাম", "মমৌজা", "கிராமம்", "ஊர்", "ம மௌஜா",
+        "గ్రా మం", "గ్రా మ", "മമൊജ", "ഗ്ര ാമം", "ಊರು", "ಗ್ರಾಮ", "મૌજા", "ગામ", "गाव", "ਪਿੰਡ", "ਮੌਜ਼ਾ",
+    ],
+    "tehsil": [
+        "तहसील","तालुका", "तहसीलदार", "তহসিল", "তালুক", "வட்டம்", "தாலுகா", "తహసీల్", "తాలూకా",
+        "താലൂക്ക്", "തഹസിൽ", "ತಾಲೂಕು", "તાલુકો", "तहसील", "तालुका", "ਤਹਿਸੀਲ", "ਤਾਲੁਕਾ",
+    ],
+    "district": [
+                                       "జిల్లా",
+        "जिला","ज़िला", "জেলা", "மாவட்டம்",   "ജില്ല", "ಜಿಲ್ಲೆ", "જિલ્લો", "जिल्हा", "ਜ਼ਿਲ੍ਹਾ",
+    ],
+    "state": [
+        "राज्य", "प्रदेश", "রাজ্য", "மாநிலம்", "రాష్ ట్రం", "സംസ്ഥാനം" , "ರಾಜ್ಯ", "રાજ્ય", "राज्य", "ਰਾਜ",
+    ],
+    "pincode": [
+        "पिनकोड","पिनकोड","पिन", "পিন ককোড", "পিনককোড", "அஞ்சல் குறியீடு" , "பின் ககோடு",
+        "పిన్ కోడ్", "పిన్‌కోడ్", "പിൻ കകോഡ്", "പിൻകകോഡ്" , "ಪಿನ್ ಕೋಡ್", "પિન કોડ", "पिन कोड", "पिनकोड", "ਪਿੰਨ ਕੋਡ" , "ਪਿਨ ਕੋਡ" ,
+    ],
+    "land_classification": [
+        "भूमि वर्गीकरण", "भूमि का प्रकार", "भूमि प्रकार", "वर्गीकरण", "জমির শ্রে ণী", "জমির ধরন",
+                                                    వర్గీకరణ",
+        "நிலவகை",   "நிலவகைப்பாடு", "భూమిరకం", "భూమి        "ഭൂമിയുടെ തരം" , "ഭൂമി വർഗ്ഗീകരണം" ,
+        "ಭೂಮಿಯ   ವಿಧ" , "ಭೂ ವರ್ಗೀಕರಣ" , "જમીનનો પ્રકાર", "જમીન વર્ગીકરણ", "भूमीचा प्रकार", "भूमी वर्गीकरण", "ਜ਼ਮੀਨ ਦੀ ਕਿਸਮ", "ਜ਼ਮੀਨ ਵਰਗੀਕਰਨ",
+    ],
+    "ownership_type": [
+        "स्वामित्व प्रकार", "स्वामित्व", "मालिकी", "মালিকানার ধরন" , "মালিকানা", "உரிமை வகை" , "உரிமை",
+        "యాజమాన్య రకం" , "యాజమాన్యం" , "ഉടമസ്ഥതയുടെ തരം" , "ഉടമസ്ഥത" , "ಮಾಲೀಕತ್ವದ ಪ್ರಕಾರ" , "ಮಾಲೀಕತ್ವ",
+        "માલિકીનો પ્રકાર" , "માલિકી", "मालकीचा प्रकार", "मालकी", "ਮਲਕੀਅਤ ਦੀ ਕਿਸਮ", "ਮਲਕੀਅਤ",
+    ],
+    "mutation_number": [
+        "दाखिलखारिजनंबर", "दाखिल खारिज", "नामांतरण नंबर", "नामांतरण", "फेरफार क्रमांक", "फेरफार",
+                                                                                   "పట్టా
+        "নামজারি নম্বর", "নামজারি", "பட்டா மாற்றம்" , "மாற்று எண்", "మ్యుటేషన్ నంబర్" , "మ్యూటేషన్" , మార్పు",
+        "പപോക്കുവരവ് നമ്പർ" , "പേര് മാറ്റം", "ಮ್ಯುಟೇಶನ್ ಸಂಖ್ಯೆ" , "ಖಾತೆ ಬದಲಾವಣೆ", "ફેરફાર નંબર", "ફેરફાર", "फेरफार", "ਨਾਮਾਂਤਰਣ ਨੰਬਰ", "ਨਾਮਾਂਤਰਣ",
+    ],
+    "registration_number": [
+        "पंजीकरण नंबर", "पंजीकरण", "रजिस्ट्री नंबर", "रजिस्ट्री", "दस्तावेज नंबर", "दस्तावेज़ नंबर",
+        "নিবন্ধন নম্বর", "নিবন্ধন", "பதிவு எண்", "பதிவு", "రిజిస్ ట్రేషన్ నంబర్" , "రిజిస్ ట్రేషన్",
+        "രജിസ്ട്രേ ഷൻ നമ്പർ" , "രജിസ്ട്രേ ഷൻ" , "ನೋಂದಣಿ ಸಂಖ್ಯೆ" , "ನೋಂದಣಿ", "નોંધણી નંબર", "નોંધણી",
+        "नोंदणी क्रमांक", "नोंदणी", "ਰਜਿਸਟ੍ਰੇਸ਼ਨ ਨੰਬਰ", "ਰਜਿਸਟ੍ਰੇਸ਼ਨ",
+    ],
+}
+
+# leftover label fragments that must not leak into values
+_PREFIX_JUNK_RE = re.compile(
+    r"^(का\s*नाम|की\s*नाम|का\s*नाम तथा|नंबर|नं\.?|क्रमांक)\s*[:：\-]?\s*" )
+
+_ALL_REGEX = {f: [re.compile(p, re.IGNORECASE) for p in pats]
+              for f, pats in ENG_LABELS.items()}
+
+DATE_RE = re.compile(r"(\d{1,2})[\s\-/.](\d{1,2})[\s\-/.](\d{2,4})")
+PIN_RE = re.compile(r"\b[1-9]\d{5}\b")
+NUM_RE = re.compile(r"\d{1,3}(?:,\d{2,3})*(?:\.\d+)?|\d+(?:\.\d+)?")
+PLOT_ID_RE = re.compile(r"[0-9]+[A-Za-z]?(?:[/\-][0-9A-Za-z]+)*")
+
+AREA_UNIT_HINTS = [
+                                                                              "హెక్టారు",
+    ("hectare", [r"hectare", r"\bhec\b", r"\bha\b", "हेक्टेयर", "হেক্টর", "ஹெக்டேர்" ,"ഹെക്ടർ", "ಹೆಕ್ಟೇರ್", "હેક્ટર", "हेक्टर", "ਹੈਕਟੇਅਰ"]),
+    ("acre", [r"acre", "एकड़","একর", "ஏக்கர்", "ఎకరం", "ഏക്കർ", "ಎಕರೆ", "એકર", "एकर", "ਏਕੜ"]),
+    ("sq.m", [r"sq\.?\s*m\b", r"square\s*m", "वर्ग मीटर", "বর্গ মিটার", "சதுர மீட்டர்", "చదరపు మీటర్", "ചതുരശ്ര മീറ്റർ", "ಚದರ ಮೀಟರ್", "ચોરસ મીટર", "चौरस मीटर", "ਵਰਗ ਮੀਟਰ"]),
+    ("sq.ft", [r"sq\.?\s*f", r"square\s*fe?e?t"]),
+    ("bigha", [r"bigha", "बीघा", "বিঘা", "பீகா", "బీఘా", "ബിഘ", "ಬಿಘಾ", "બીઘા", "बीघा", "ਬੀਘਾ"]),
+    ("biswa", [r"biswa", "बिसवा", "বিসওয়া", "பிஸ்வா", "బిస్వా", "ബിസ്വ", "ಬಿಸ್ವಾ", "બિસવા", "बिसवा", "ਬਿਸਵਾ"]),
+    ("guntha", [r"guntha", "गुंठा", "গুঠা", "குண்டா", "గుంట", "ഗുണ്ട", "ಗುಂಟ", "ગુંઠા", "गुंठा", "ਗੁੰਠਾ"]),
+    ("cent", [r"\bcent\b"]),
+]
+
+_TRIM = " :-–—.|,/\\;,;_=~\"'`\t"
+
+# Boilerplate values that crop up when a label spotter matches the *header*
+# of the form (e.g. "Office of the Tehsildar", "…State Land Revenue Code").
+_JUNK_VALUES = {"dar", "कार्यालय", "शासन", "विभाग", "सरकार", "government",
+                "department", "office", "form", "prescribed", "code"}
+_JUNK_HINT_RE = re.compile(
+    r"(?i)form\s|prescribed|land\s*revenue|department|government|office\s+of")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _clean_value(text: str) -> str:
+    text = text.strip(_TRIM).strip()
+    text = re.sub(r"\s{2,}", " ", text)
+    text = _PREFIX_JUNK_RE.sub("", text)
+    return text.strip(_TRIM).strip()
+
+
+_CO_LABEL = re.compile(r"(?i)^(mauza|taluka|tehsil|tahsil|dist|zila|gram|gaon|"
+                       r"village|state|district)\b\s*")
+
+def _strip_colabels(value: str) -> str:
+    """'/ Mauza Rampur' -> 'Rampur' style co-label residue cleanup."""
+    value = _clean_value(value)
+    for _ in range(2):
+        m = _CO_LABEL.match(value)
+        if not m:
+            break
+        value = _clean_value(value[m.end():])
+    return value
+
+
+def _smart_case(text: str) -> str:
+    if text.isupper() or text.islower():
+        return " ".join(w[:1].upper() + w[1:].lower() for w in text.split())
+    return text
+
+
+def _find_label_all(lines, field):
+    """Return every (line, span, kind) candidate that mentions ``field``."""
+    found = []
+    for line in lines:
+        for rx in _ALL_REGEX.get(field, []):
+            m = rx.search(line["text"])
+            if m:
+                found.append((line, m.span(), "en"))
+                break
+    for line in lines:
+        for token in INDIC_LABELS.get(field, []):
+            idx = line["text"].find(token)
+            if idx >= 0:
+                cand = (line, (idx, idx + len(token)), "indic")
+                if cand not in found:
+                    found.append(cand)
+                break
+    return found
+
+
+def _score_candidate(field, value, line, span):
+    """Heuristic plausibility score for one label match."""
+    s = 0.0
+    if value:
+        s += 2.0
+        if len(value) >= 3:
+            s += 1.0
+    if value.strip().lower() in _JUNK_VALUES:
+        s -= 5.0
+    if field in ("state", "tehsil", "district", "village", "owner_name",
+                 "father_name") and _JUNK_HINT_RE.search(value):
+        s -= 5.0
+    if span[1] <= max(30, int(len(line["text"]) * 0.45)):
+        s += 1.0                       # labels in forms sit on the left
+    return s
+
+
+def _label_spans(line_text, exclude_field=None):
+    """All label match spans in a line (used to truncate values)."""
+    spans = []
+    for field, rxs in _ALL_REGEX.items():
+        for rx in rxs:
+            for m in rx.finditer(line_text):
+                spans.append((m.start(), m.end(), field))
+    for field, tokens in INDIC_LABELS.items():
+        for token in tokens:
+            start = 0
+            while True:
+                idx = line_text.find(token, start)
+                if idx < 0:
+                    break
+                spans.append((idx, idx + len(token), field))
+                start = idx + 1
+    spans.sort()
+    if exclude_field:
+        spans = [s for s in spans if s[2] != exclude_field]
+    return spans
+
+
+def _line_value(line, span, field):
+    """Extract the value right of a matched label span within the line."""
+    tail = line["text"][span[1]:]
+    # cut the tail at the start of any *other* label
+    cut = len(tail)
+    for s, e, f in _label_spans(tail, exclude_field=field):
+        if s <= cut:
+            # guard: "pin" inside "pincode" style overlaps, require word break
+            cut = min(cut, s)
+            break
+    value = _clean_value(tail[:cut])
+    used_words = _words_after(line, span)
+    return value, used_words
+
+
+def _words_after(line, span):
+    """Words of the line starting after character index ``span[1]``."""
+    cur, words = 0, []
+    for w in line["words"]:
+        start = cur
+        cur += len(w["text"]) + 1
+        if start >= span[1]:
+            words.append(w)
+    return words
+
+
+def _conf(words, label_bonus=0.05, base=None):
+    if words:
+        c = mean(min(w["conf"], 100) for w in words) / 100.0
+    else:
+        c = base if base is not None else 0.30
+    return max(0.05, min(0.99, c + label_bonus))
+
+
+def _parse_date(text):
+    m = DATE_RE.search(text)
+    if not m:
+        return None
+    d, mo, y = (int(m.group(i)) for i in (1, 2, 3))
+    if y < 100:
+        y += 2000 if y < 50 else 1900
+    if not (1 <= mo <= 12 and 1 <= d <= 31 and 1850 <= y <= 2100):
+        return None
+    return f"{d:02d}/{mo:02d}/{y:04d}"
+
+
+def _detect_unit(text):
+    for name, hints in AREA_UNIT_HINTS:
+        for hint in hints:
+            if hint.isascii():
+                if re.search("(?i)" + hint, text):
+                    return name
+            elif hint in text:
+                return name
+    return ""
+
+
+def _parse_area(text, require_unit=False):
+    """First plausible area number; when ``require_unit`` the number must be
+    followed by an area unit (protects the free-text fallback from grabbing
+    dates or register numbers)."""
+    for m in NUM_RE.finditer(text):
+        window = text[m.end():m.end() + 28]
+        unit = _detect_unit(window)
+        if require_unit and not unit:
+            continue
+        try:
+            value = float(m.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if not (0 < value < 1e7):
+            continue
+        return value, unit or _detect_unit(text)
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
+# Main extractor
+# ---------------------------------------------------------------------------
+def extract_fields(ocr: dict, apply_learning: bool = True) -> dict:
+    """Turn OCR output into structured fields.
+
+    Returns ``{field: {value, confidence, source, needs_review}}``.
+    """
+    from records.constants import REQUIRED_FIELDS
+
+    lines = ocr["lines"]
+    text = ocr["text"]
+    threshold = settings.OCR_CONFIDENCE_THRESHOLD
+    out = {}
+
+    for field in FIELD_KEYS:
+        candidates = _find_label_all(lines, field)
+        value, source, conf, best_line, best_span = "", "ocr", 0.0, None, None
+        best_score = None
+        for line, span, kind in candidates:
+            cand_value, words = _line_value(line, span, field)
+            cand_conf = _conf(words, label_bonus=0.05)
+            if not cand_value:                   # try the line below the label
+                idx = lines.index(line)
+                if idx + 1 < len(lines):
+                    nxt = lines[idx + 1]
+                    cand_value = _clean_value(nxt["text"])
+                    cand_conf = _conf(nxt["words"], label_bonus=-0.05)
+            score = _score_candidate(field, cand_value, line, span)
+            if best_score is None or score > best_score:
+                best_score, value, conf = score, cand_value, cand_conf
+                best_line, best_span = line, span
+        # ---- typed normalisation -------------------------------------
+        if field == "plot_area":
+            parsed, unit = (None, "")
+            if value:
+                parsed, unit = _parse_area(value)
+            if parsed is None:
+                parsed, unit = _parse_area(text, require_unit=True)
+                if parsed is not None and not value:
+                    conf = _conf(None, base=0.36)
+            value = f"{parsed:g}" if parsed is not None else ""
+            if unit:
+                out["area_unit"] = {"value": unit, "confidence": conf,
+                                    "source": "ocr",
+                                    "needs_review": conf < threshold}
+        elif field == "area_unit":
+            value = out.get("area_unit", {}).get("value") or _detect_unit(text)
+        elif field == "pincode":
+            m = (PIN_RE.search(value) if value else None) or PIN_RE.search(text)
+            value = m.group(0) if m else ""
+            if value and not candidates:
+                conf = _conf(None, base=0.42)
+        elif field in ("survey_number", "khasra_number", "khata_number"):
+            if value:
+                m = PLOT_ID_RE.search(value.replace(" ", ""))
+                value = m.group(0) if m else _clean_value(value)[:40]
+        elif field in ("mutation_number", "registration_number"):
+            if value:
+                value = re.split(r"(?i)\bdate\b|दिनांक|दिनाक|दिनांक:" , value)[0]
+                value = _clean_value(value)[:40]
+        elif field in ("owner_name", "father_name", "land_classification",
+                       "ownership_type"):
+            value = _smart_case(_clean_value(value))[:120]
+        elif field in ("village", "tehsil", "district", "state"):
+            value = _smart_case(_strip_colabels(value))[:120]
+
+        # ---- dates anchored to their labels --------------------------
+        if field == "mutation_number" and best_line is not None:
+            d = _parse_date(best_line["text"][best_span[1]:])
+            if d:
+                out["mutation_date"] = {"value": d, "confidence": conf,
+                                        "source": "ocr",
+                                        "needs_review": conf < threshold}
+        if field == "registration_number" and best_line is not None:
+            d = _parse_date(best_line["text"][best_span[1]:])
+            if d:
+                out["registration_date"] = {"value": d, "confidence": conf,
+                                            "source": "ocr",
+                                            "needs_review": conf < threshold}
+
+        # ---- AI learning: auto-apply memorised corrections -----------
+        if apply_learning and value and field in LEARNABLE_FIELDS:
+            corrected = learn.apply_and_count(field, value)
+            if corrected:
+                value, source = corrected, "learned"
+                conf = min(0.97, conf + 0.12)
+
+        needs_review = conf < threshold or (field in REQUIRED_FIELDS and not value)
+
+        if field in out and out[field]["value"]:
+            continue                     # dates stored above keep priority
+        out[field] = {"value": value, "confidence": round(conf, 3),
+                      "source": source, "needs_review": bool(needs_review)}
+
+    # backfill mutation/registration dates from the raw text when missing
+    if not out.get("mutation_date", {}).get("value"):
+        for line in lines:
+            if any(t in line["text"] for t in ("दाखिल", "Mutation", "mutation")):
+                d = _parse_date(line["text"])
+                if d:
+                    out["mutation_date"] = {"value": d,
+                                            "confidence": _conf(line["words"], -0.05),
+                                            "source": "ocr", "needs_review": False}
+                    break
+    if not out.get("registration_date", {}).get("value"):
+        for line in lines:
+            lt = line["text"].lower()
+            if ("regist" in lt or "पंजीकरण"inlt or "रजिस्ट्री" in lt):
+                d = _parse_date(line["text"])
+                if d:
+                    out["registration_date"] = {"value": d,
+                                                "confidence": _conf(line["words"], -0.05),
+                                                "source": "ocr", "needs_review": False}
+                    break
+
+    for f in FIELD_KEYS:        # guarantee full schema
+        out.setdefault(f, {"value": "", "confidence": 0.0, "source": "ocr",
+                           "needs_review": True})
+    return out

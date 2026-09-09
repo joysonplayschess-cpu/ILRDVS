@@ -1,0 +1,47 @@
+{% extends "records/base.html" %}
+{% load records_extras %}
+{% block title %}Verification Queue{% endblock %}
+{% block heading %}Verification Queue{% endblock %}
+{% block subheading %}Human-in-the-loop review — records below the {{ threshold_pct|floatformat:0 }}% confidence threshold or with validation errors surface here{% endblock %}
+
+{% block content %}
+<section class="card">
+  <table class="table">
+    <thead><tr>
+      <th>#</th><th>Owner</th><th>Plot IDs</th><th>Village / District</th>
+      <th>Overall confidence</th><th>Low-conf. fields</th><th>Open errors</th>
+      <th>Flags</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for r in page.object_list %}
+    <tr>
+      <td>{{ r.pk }}</td>
+      <td>{{ r.owner_name|default:"—" }}</td>
+      <td class="mono">{{ r.primary_plot_id }}{% if r.khata_number %} · K/{{ r.khata_number }}{% endif %}</td>
+      <td>{{ r.village|default:"—" }}, {{ r.district|default:"—" }}</td>
+      <td>
+        <div class="confbar"><span style="width:{{ r.overall_confidence_pct }}%" class="{{ r.overall_confidence|conf_class }}"></span></div>
+        <small class="muted">{{ r.overall_confidence_pct }}%</small>
+      </td>
+      <td><span class="badge {% if r.review_fields %}warn{% else %}ok{% endif %}">{{ r.review_fields }}</span></td>
+      <td><span class="badge {% if r.open_errors %}bad{% else %}ok{% endif %}">{{ r.open_errors }}</span></td>
+      <td>{% if r.is_duplicate %}<span class="badge bad">duplicate</span>{% endif %}</td>
+      <td>{% if role == 'ADMIN' or role == 'VERIFIER' %}
+        <a class="btn primary sm" href="{% url 'verify_record' r.pk %}">Review →</a>
+        {% else %}<a class="btn ghost sm" href="{% url 'document_detail' r.document_id %}">View</a>{% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="9" class="muted">Queue is clear — every record is verified. 🎉</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if page.paginator.num_pages > 1 %}
+  <div class="pagination">
+    {% if page.has_previous %}<a class="btn ghost sm" href="?page={{ page.previous_page_number }}">← Prev</a>{% endif %}
+    <span class="muted small">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a class="btn ghost sm" href="?page={{ page.next_page_number }}">Next →</a>{% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

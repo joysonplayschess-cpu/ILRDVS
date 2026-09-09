@@ -1,0 +1,60 @@
+{% extends "records/base.html" %}
+{% load records_extras %}
+{% block title %}Documents{% endblock %}
+{% block heading %}Document Repository{% endblock %}
+{% block subheading %}Scanned land records with OCR metadata and processing state{% endblock %}
+
+{% block content %}
+<section class="card">
+  <form class="filterbar" method="get">
+    <div class="search">
+      <svg class="ic"><use href="#i-search"/></svg>
+      <input name="q" value="{{ q }}" placeholder="Search file name, state, district, owner…">
+    </div>
+    <select name="status" onchange="this.form.submit()">
+      <option value="">All statuses</option>
+      {% for code, label in statuses %}
+      <option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn ghost" type="submit">Filter</button>
+    {% if role == 'ADMIN' or role == 'OPERATOR' %}
+    <a class="btn primary" href="{% url 'upload' %}"><svg class="ic"><use href="#i-upload"/></svg> New upload</a>
+    {% endif %}
+  </form>
+
+  <table class="table">
+    <thead><tr>
+      <th>#</th><th>Document</th><th>Type</th><th>Lang</th><th>Pages</th>
+      <th>Status</th><th>OCR conf.</th><th>Owner / Plot</th><th>Uploaded</th>
+    </tr></thead>
+    <tbody>
+    {% for d in page.object_list %}
+    <tr class="rowlink" data-href="{% url 'document_detail' d.pk %}">
+      <td>{{ d.pk }}</td>
+      <td>{{ d.filename|truncatechars:38 }}</td>
+      <td class="upper muted">{{ d.filename|slice:"-3:" }}</td>
+      <td class="upper">{{ d.detected_language|default:d.language }}</td>
+      <td>{{ d.page_count }}</td>
+      <td><span class="badge {{ d.status|status_class }}">{{ d.get_status_display }}</span></td>
+      <td>{% if d.status == 'PROCESSED' %}
+        <div class="confbar"><span style="width:{{ d.ocr_confidence_pct }}%" class="{{ d.ocr_confidence|conf_class }}"></span></div>
+        <small class="muted">{{ d.ocr_confidence_pct }}%</small>
+      {% else %}—{% endif %}</td>
+      <td>{% if d.record %}{{ d.record.owner_name|default:"—" }} <span class="muted mono">· {{ d.record.primary_plot_id }}</span>{% else %}—{% endif %}</td>
+      <td class="muted">{{ d.uploaded_at|date:"d M Y, H:i" }}</td>
+    </tr>
+    {% empty %}<tr><td colspan="9" class="muted">No documents match.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if page.paginator.num_pages > 1 %}
+  <div class="pagination">
+    {% if page.has_previous %}<a class="btn ghost sm" href="?page={{ page.previous_page_number }}&q={{ q }}&status={{ status }}">← Prev</a>{% endif %}
+    <span class="muted small">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a class="btn ghost sm" href="?page={{ page.next_page_number }}&q={{ q }}&status={{ status }}">Next →</a>{% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

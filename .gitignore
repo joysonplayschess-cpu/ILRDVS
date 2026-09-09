@@ -1,0 +1,10 @@
+# ILRDVS — dev artifacts
+__pycache__/
+*.py[cod]
+db.sqlite3*
+media/
+venv
+.env
+*.log
+.DS_Store
+.env.example

@@ -1,0 +1,63 @@
+{% extends "records/base.html" %}
+{% load records_extras %}
+{% block title %}Land Records{% endblock %}
+{% block heading %}Digitized Land Records{% endblock %}
+{% block subheading %}Structured register searchable by owner, plot, village and district{% endblock %}
+
+{% block content %}
+<section class="card">
+  <form class="filterbar" method="get">
+    <div class="search">
+      <svg class="ic"><use href="#i-search"/></svg>
+      <input name="q" value="{{ params.q }}" placeholder="Owner, survey / khasra / khata no., village…">
+    </div>
+    <select name="status" onchange="this.form.submit()">
+      <option value="">All statuses</option>
+      <option value="VERIFIED" {% if params.status == 'VERIFIED' %}selected{% endif %}>Verified</option>
+      <option value="PENDING" {% if params.status == 'PENDING' %}selected{% endif %}>Pending verification</option>
+      <option value="REJECTED" {% if params.status == 'REJECTED' %}selected{% endif %}>Rejected</option>
+    </select>
+    <input name="state" value="{{ params.state }}" list="states" placeholder="State">
+    <datalist id="states">{% for s in states %}<option value="{{ s }}">{% endfor %}</datalist>
+    <input name="district" value="{{ params.district }}" list="districts" placeholder="District">
+    <datalist id="districts">{% for d in districts %}<option value="{{ d }}">{% endfor %}</datalist>
+    <button class="btn ghost" type="submit">Filter</button>
+    <a class="btn ghost" href="{% url 'records_export' %}?{{ params.urlencode }}">⤓ Export CSV</a>
+  </form>
+
+  <table class="table">
+    <thead><tr>
+      <th>#</th><th>Owner</th><th>Survey / Khasra</th><th>Khata</th>
+      <th>Area</th><th>Village</th><th>District</th><th>State</th>
+      <th>Conf.</th><th>Status</th>
+    </tr></thead>
+    <tbody>
+    {% for r in page.object_list %}
+    <tr class="rowlink" data-href="{% url 'document_detail' r.document_id %}">
+      <td>{{ r.pk }}</td>
+      <td>{{ r.owner_name|default:"—" }}</td>
+      <td class="mono">{{ r.survey_number|default:"—" }}{% if r.khasra_number and r.khasra_number != r.survey_number %} / {{ r.khasra_number }}{% endif %}</td>
+      <td class="mono">{{ r.khata_number|default:"—" }}</td>
+      <td>{{ r.plot_area|default:"—" }} {{ r.area_unit }}</td>
+      <td>{{ r.village|default:"—" }}</td>
+      <td>{{ r.district|default:"—" }}</td>
+      <td>{{ r.state|default:"—" }}</td>
+      <td><div class="confbar"><span style="width:{{ r.overall_confidence_pct }}%" class="{{ r.overall_confidence|conf_class }}"></span></div>
+          <small class="muted">{{ r.overall_confidence_pct }}%</small></td>
+      <td><span class="badge {{ r.status|status_class }}">{{ r.get_status_display }}</span>
+          {% if r.is_duplicate %}<span class="badge bad">dup</span>{% endif %}</td>
+    </tr>
+    {% empty %}<tr><td colspan="10" class="muted">No records match the filters.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if page.paginator.num_pages > 1 %}
+  <div class="pagination">
+    {% if page.has_previous %}<a class="btn ghost sm" href="?page={{ page.previous_page_number }}&{{ params.urlencode }}">← Prev</a>{% endif %}
+    <span class="muted small">Page {{ page.number }} of {{ page.paginator.num_pages }} ({{ page.paginator.count }} records)</span>
+    {% if page.has_next %}<a class="btn ghost sm" href="?page={{ page.next_page_number }}&{{ params.urlencode }}">Next →</a>{% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

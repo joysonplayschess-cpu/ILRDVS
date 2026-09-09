@@ -1,0 +1,121 @@
+{% extends "records/base.html" %}
+{% load static records_extras %}
+{% block title %}Dashboard{% endblock %}
+{% block heading %}Digitization Dashboard{% endblock %}
+{% block subheading %}Programme-wide view of the land-record digitization pipeline{% endblock %}
+
+{% block content %}
+<div class="kpi-grid">
+  <div class="kpi"><span class="kpi-label">Documents received</span>
+    <span class="kpi-value">{{ kpis.documents }}</span>
+    <span class="kpi-sub">{{ kpis.processed }} processed ({{ kpis.processed_pct }}%) · {{ kpis.failed }} failed</span></div>
+  <div class="kpi"><span class="kpi-label">Avg. extraction confidence</span>
+    <span class="kpi-value">{{ kpis.avg_confidence }}%</span>
+    <span class="kpi-sub">across all extracted records</span></div>
+  <div class="kpi ok"><span class="kpi-label">Verified records</span>
+    <span class="kpi-value">{{ kpis.verified }}</span>
+    <span class="kpi-sub">locked into the digital register</span></div>
+  <div class="kpi warn"><span class="kpi-label">Pending verification</span>
+    <span class="kpi-value">{{ kpis.pending }}</span>
+    <span class="kpi-sub">{{ kpis.fields_review }} low-confidence fields need review</span></div>
+  <div class="kpi bad"><span class="kpi-label">Duplicates flagged</span>
+    <span class="kpi-value">{{ kpis.duplicates }}</span>
+    <span class="kpi-sub">auto-detected by cross-record matching</span></div>
+  <div class="kpi brain"><span class="kpi-label">Correction memory</span>
+    <span class="kpi-value">{{ kpis.learned }}</span>
+    <span class="kpi-sub">verified OCR repairs · re-applied {{ kpis.learned_applied }}×</span></div>
+</div>
+
+<div class="grid-2">
+  <section class="card">
+    <h3>State-wise digitization progress</h3>
+    <p class="muted small">Documents processed vs records verified, per state</p>
+    <div class="chart"><canvas id="ch-states"></canvas></div>
+  </section>
+  <section class="card">
+    <h3>Documents by status</h3>
+    <p class="muted small">Upload → processing → processed lifecycle</p>
+    <div class="chart"><canvas id="ch-docstatus"></canvas></div>
+  </section>
+  <section class="card">
+    <h3>Extraction confidence trend</h3>
+    <p class="muted small">Record-level OCR+NLP confidence across processed documents</p>
+    <div class="chart"><canvas id="ch-accuracy"></canvas></div>
+  </section>
+  <section class="card">
+    <h3>Open validation issues</h3>
+    <p class="muted small">Business-rule findings awaiting action, by rule</p>
+    <div class="chart"><canvas id="ch-issues"></canvas></div>
+  </section>
+  <section class="card">
+    <h3>Document languages detected</h3>
+    <p class="muted small">Script detection over the OCR corpus</p>
+    <div class="chart"><canvas id="ch-lang"></canvas></div>
+  </section>
+  <section class="card">
+    <h3>Uploads per month</h3>
+    <p class="muted small">Digitization throughput</p>
+    <div class="chart"><canvas id="ch-monthly"></canvas></div>
+  </section>
+</div>
+
+<div class="grid-2">
+  <section class="card">
+    <div class="card-head"><h3>Verification queue</h3>
+      <a class="btn ghost sm" href="{% url 'verify_queue' %}">Open queue</a></div>
+    <table class="table">
+      <thead><tr><th>#</th><th>Owner</th><th>Plot</th><th>Location</th><th>Conf.</th><th></th></tr></thead>
+      <tbody>
+      {% for r in queue %}
+      <tr>
+        <td>{{ r.pk }}</td>
+        <td>{{ r.owner_name|default:"—" }}</td>
+        <td class="mono">{{ r.primary_plot_id }}</td>
+        <td>{{ r.village }}, {{ r.district }}</td>
+        <td><div class="confbar"><span style="width:{{ r.overall_confidence_pct }}%" class="{{ r.overall_confidence|conf_class }}"></span></div>
+            <small class="muted">{{ r.overall_confidence_pct }}%</small></td>
+        <td><a class="btn sm primary" href="{% url 'verify_record' r.pk %}">Verify</a></td>
+      </tr>
+      {% empty %}<tr><td colspan="6" class="muted">Queue is clear — nothing pending. 🎉</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h3><svg class="ic"><use href="#i-brain"/></svg> Verified-correction memory</h3></div>
+    <table class="table">
+      <thead><tr><th>Field</th><th>OCR read</th><th>Learned value</th><th>Used</th></tr></thead>
+      <tbody>
+      {% for lc in learned_recent %}
+      <tr><td>{{ lc.field_name }}</td><td class="mono badtext">{{ lc.raw_value }}</td>
+          <td class="mono oktext">{{ lc.corrected_value }}</td><td>{{ lc.times_applied }}×</td></tr>
+      {% empty %}<tr><td colspan="4" class="muted">Empty until verifiers correct OCR spellings on learnable fields (names, places, land/ownership type).</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="card-head" style="margin-top:18px"><h3>Latest documents</h3>
+      <a class="btn ghost sm" href="{% url 'document_list' %}">All documents</a></div>
+    <table class="table">
+      <thead><tr><th>File</th><th>Status</th><th>OCR conf.</th><th>Lang</th></tr></thead>
+      <tbody>
+      {% for d in recent_docs %}
+      <tr>
+        <td><a href="{% url 'document_detail' d.pk %}">{{ d.filename|truncatechars:34 }}</a></td>
+        <td><span class="badge {{ d.status|status_class }}">{{ d.get_status_display }}</span></td>
+        <td>{{ d.ocr_confidence_pct }}%</td>
+        <td class="upper">{{ d.detected_language|default:d.language }}</td>
+      </tr>
+      {% empty %}<tr><td colspan="4" class="muted">No documents yet — upload one to begin.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{{ chart_data|json_script:"chart-data" }}
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'vendor/chart.umd.min.js' %}"></script>
+<script src="{% static 'js/dashboard.js' %}"></script>
+{% endblock %}

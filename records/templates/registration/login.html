@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · ILRDVS</title>
+<style>
+  :root{--bg:#eef2fb;--ink:#17233f;--muted:#667085;--brand:#2f6bff;--card:#fff}
+  *{box-sizing:border-box;margin:0}
+  body{font-family:"Inter",system-ui,"Segoe UI",Roboto,sans-serif;background:
+    radial-gradient(1200px 500px at 10% -10%,#dbe6ff,transparent),
+    radial-gradient(900px 500px at 110% 110%,#d3f5ea,transparent),var(--bg);
+    display:grid;place-items:center;min-height:100vh;color:var(--ink)}
+  .card{background:var(--card);border-radius:18px;box-shadow:0 24px 60px -20px rgba(23,35,63,.25);
+    padding:42px 44px;width:min(430px,92vw)}
+  .brand{display:flex;gap:12px;align-items:center;margin-bottom:22px}
+  .brand small{color:var(--muted);display:block;font-size:12px}
+  h1{font-size:22px}
+  label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin:16px 0 6px}
+  input{width:100%;padding:11px 13px;border:1.5px solid #d9e0ee;border-radius:10px;font-size:15px}
+  input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px rgba(47,107,255,.15)}
+  button{margin-top:22px;width:100%;padding:12px;border:0;border-radius:10px;background:var(--brand);
+    color:#fff;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.2px}
+  button:hover{background:#2458de}
+  .err{background:#fde8ea;color:#c62828;border-radius:8px;padding:10px 12px;font-size:13px;margin-top:14px}
+  .demo{margin-top:22px;background:#f4f6fb;border-radius:12px;padding:14px 16px;font-size:12.5px;color:var(--muted)}
+  .demo code{background:#e8eeff;border-radius:6px;padding:1px 6px;font-size:12px}
+  .demo p{margin:5px 0}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <svg width="42" height="42" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#2f6bff"/><path d="M7 21 7 11 16 6l9 5v10z" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M12 21v-7m8 7v-7M7 16h18" stroke="#fff" stroke-width="1.6"/></svg>
+      <div><h1>ILRDVS</h1><small>Intelligent Land Record Digitization &amp; Validation System</small></div>
+    </div>
+    {% if form.errors %}<div class="err">Invalid username or password. Please try again.</div>{% endif %}
+    <form method="post">{% csrf_token %}
+      <label for="id_username">Username</label>
+      <input id="id_username" name="username" autofocus autocomplete="username">
+      <label for="id_password">Password</label>
+      <input id="id_password" name="password" type="password" autocomplete="current-password">
+      <button type="submit">Sign in</button>
+    </form>
+    <div class="demo">
+      <strong>Demo accounts</strong>
+      <p><code>admin / admin123</code> — full access (Django admin too)</p>
+      <p><code>verifier1 / verify123</code> — verification officer (HITL workflow)</p>
+      <p><code>operator1 / operate123</code> — digitization operator (uploads)</p>
+      <p><code>viewer1 / view123</code> — read-only citizen-services view</p>
+    </div>
+  </div>
+</body>
+</html>

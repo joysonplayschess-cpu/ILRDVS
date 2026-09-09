@@ -1,0 +1,79 @@
+{% extends "records/base.html" %}
+{% block title %}Upload & Digitize{% endblock %}
+{% block heading %}Upload &amp; Digitize Documents{% endblock %}
+{% block subheading %}Scans, photos and legacy PDFs are enhanced (gamma correction, denoise, binarize, deskew), OCR-ed and converted into structured, validated records{% endblock %}
+
+{% block content %}
+<div class="grid-2">
+<section class="card">
+  <h3>Ingest documents</h3>
+  <form id="upload-form" method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <div id="dropzone" class="dropzone">
+      <svg class="dz-icon"><use href="#i-upload"/></svg>
+      <p><strong>Drag &amp; drop</strong> scans here, or</p>
+      <label class="btn primary">Browse files<input id="file-input" name="files" type="file"
+        accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" multiple hidden></label>
+      <p class="muted small">PDF · PNG · JPG · TIFF · BMP · WEBP — up to 15&nbsp;MB each</p>
+      <ul id="file-list" class="file-list"></ul>
+    </div>
+
+    <div class="form-grid">
+      <div class="form-field">
+        <label>Document language</label>
+        <select name="language">
+          {% for code, label in languages.items %}
+          <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+        <small class="muted">“Auto-detect” OCRs with the combined English+Hindi model and reports the dominant script.</small>
+      </div>
+      <div class="form-field">
+        <label>Gamma correction <span class="pill">image enhancement</span></label>
+        <select name="gamma_mode" id="gamma-mode">
+          <option value="auto" selected>Automatic (recommended for faded/dark scans)</option>
+          <option value="manual">Manual value…</option>
+          <option value="off">Off (document already clean)</option>
+        </select>
+        <div id="gamma-slider-wrap" class="hidden">
+          <input type="range" id="gamma-slider" name="gamma_value"
+                 min="0.4" max="2.8" step="0.05" value="1.4">
+          <small class="muted">γ = <code id="gamma-out">1.40</code> · &gt;1 brightens dark scans, &lt;1 deepens faded scans</small>
+        </div>
+      </div>
+      <div class="form-field">
+        <label>State (metadata)</label>
+        <input name="state_name" placeholder="e.g. Uttar Pradesh">
+      </div>
+      <div class="form-field">
+        <label>District (metadata)</label>
+        <input name="district_name" placeholder="e.g. Varanasi">
+      </div>
+    </div>
+    <button class="btn primary lg" type="submit" id="upload-btn">
+      <svg class="ic"><use href="#i-upload"/></svg> Enhance · OCR · Extract · Validate
+    </button>
+  </form>
+</section>
+
+<section>
+  <div class="card">
+    <h3>What happens after upload</h3>
+    <ol class="steps">
+      <li><b>Image enhancement</b> — grayscale, automatic gamma correction, denoising, local-contrast CLAHE, adaptive binarization, speckle removal and deskew.</li>
+      <li><b>Multilingual OCR</b> — Tesseract (free &amp; open-source) with Indian language packs; word-level confidence scores.</li>
+      <li><b>NLP field extraction</b> — English &amp; Indic label spotting, typed parsing of areas, plot ids, dates and PIN codes.</li>
+      <li><b>Validation</b> — business rules, state↔district cross-checks and duplicate detection.</li>
+      <li><b>Human verification</b> — low-confidence records enter the HITL queue; every correction trains the system.</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h3>Machine integration</h3>
+    <p class="muted small">The same pipeline is available via the JSON API
+      (<code>POST /api/v1/documents/</code>) using the <code>X-API-Key</code>
+      header — ready for LRMS / DILRMP back-office systems. See
+      <code>PROJECT_REPORT.md</code> §9 for examples.</p>
+  </div>
+</section>
+</div>
+{% endblock %}

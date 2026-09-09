@@ -1,0 +1,33 @@
+Django>=5.0,<7.0
+pytesseract>=0.3.10
+opencv-python-headless>=4.8
+pillow>=10.0
+numpy>=1.26
+PyMuPDF>=1.24
+requests>=2.31
+
+# Optional -- only needed if you want the third-choice OCR engine
+# (PaddleOCR). Safe to leave uninstalled: records/pipeline/ocr_paddle.py
+# detects its absence and the pipeline just uses Bhashini/Tesseract.
+#   paddleocr>=2.7
+#   paddlepaddle>=2.5
+#
+# No extra Python package is needed for Bhashini (records/pipeline/
+# ocr_bhashini.py uses `requests`, already listed above) -- just set
+# BHASHINI_USER_ID / BHASHINI_API_KEY, see config/settings.py.
+
+# System dependencies (install via apt / yum / brew):
+#   tesseract-ocr
+#   tesseract-ocr-hin tesseract-ocr-ben tesseract-ocr-tam tesseract-ocr-tel
+#   tesseract-ocr-kan tesseract-ocr-guj tesseract-ocr-mar tesseract-ocr-pan
+#   tesseract-ocr-mal                (Malayalam - detected by pipeline/ocr.py)
+#   fonts-deva fonts-lohit-deva   (REQUIRED for demo sample generation:
+#                                  without a Devanagari font the synthetic
+#                                  Hindi scans render as empty boxes)
+#   poppler-utils                 (PDF rendering helpers)
+#
+# Optional accuracy tip: replacing the distro hin.traineddata with the
+# tessdata_best model measurably improves Devanagari recognition:
+#   ./scripts/install_tessdata_best.sh hin
+#   (or for every configured language: ./scripts/install_tessdata_best.sh \
+#    eng hin ben tam tel kan guj mar pan)

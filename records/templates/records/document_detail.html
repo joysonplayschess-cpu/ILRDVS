@@ -1,0 +1,194 @@
+{% extends "records/base.html" %}
+{% load records_extras %}
+{% block title %}Document #{{ doc.pk }}{% endblock %}
+{% block heading %}Document #{{ doc.pk }} — {{ doc.filename|truncatechars:44 }}{% endblock %}
+{% block subheading %}Unstructured scan → enhanced image → OCR text → structured record{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <a class="btn ghost sm" href="{% url 'document_list' %}">← All documents</a>
+  <span class="badge {{ doc.status|status_class }}">{{ doc.get_status_display }}</span>
+  {% if record %}<span class="badge {{ record.status|status_class }}">Record: {{ record.get_status_display }}</span>{% endif %}
+  {% if record and record.is_duplicate %}<span class="badge bad">Duplicate plot detected</span>{% endif %}
+  <span class="spacer"></span>
+  {% if record and record.status == 'PENDING' and role != 'VIEWER' %}
+  <a class="btn primary sm" href="{% url 'verify_record' record.pk %}"><svg class="ic"><use href="#i-verify"/></svg> Verify record</a>
+  {% endif %}
+  {% if role == 'ADMIN' or role == 'OPERATOR' %}
+  <form method="post" action="{% url 'document_reprocess' doc.pk %}" class="inline-form"
+        onsubmit="return confirm('Re-run enhancement + OCR + extraction for this document?')">
+    {% csrf_token %}
+    <select name="gamma_mode" class="sm">
+      <option value="auto">γ auto</option><option value="off">γ off</option>
+    </select>
+    <button class="btn ghost sm" type="submit">↻ Reprocess</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if doc.status == 'FAILED' %}
+<div class="alert error"><svg><use href="#i-x"/></svg><div><strong>Processing failed.</strong> {{ doc.error_message }}</div></div>
+{% endif %}
+
+<div class="doc-layout">
+  <div class="card preview-card">
+    <div class="card-head">
+      <h3>Scan</h3>
+      <div class="btngroup">
+        <button class="btn ghost sm active" id="btn-orig" type="button">Original</button>
+        <button class="btn ghost sm" id="btn-enha" type="button">Enhanced (γ-corrected)</button>
+      </div>
+    </div>
+    <div class="preview">
+      <div id="pane-orig">
+        {% if doc.is_image %}
+        <img src="{{ doc.file.url }}" alt="original scan">
+        {% else %}
+        <iframe src="{{ doc.file.url }}" title="PDF preview"></iframe>
+        <p class="muted small center">PDF source — page 1 preview</p>
+        {% endif %}
+      </div>
+      <div id="pane-enha" class="hidden">
+        {% if doc.page_count > doc.processed_page_count %}
+        <p class="muted small center" style="padding:6px 0">
+          Showing {{ doc.processed_page_count }} processed of {{ doc.page_count }} source page(s)
+          — the rest were skipped (pipeline cap, see log).</p>
+        {% endif %}
+        {% if doc.pages.all %}
+        {% for page in doc.pages.all %}
+        <div class="page-block">
+          <p class="muted small">Page {{ page.page_number }} of {{ doc.page_count }}
+            — OCR confidence {{ page.ocr_confidence_pct }}% ({{ page.word_count }} words)</p>
+          <img src="{{ page.processed_image.url }}" alt="enhanced scan page {{ page.page_number }}">
+        </div>
+        {% endfor %}
+        {% elif doc.processed_image %}
+        <img src="{{ doc.processed_image.url }}" alt="enhanced scan">
+        {% else %}
+        <p class="muted center" style="padding:60px 0">No enhanced image yet — process the document first.</p>
+        {% endif %}
+      </div>
+    </div>
+    {% if doc.preprocess_info %}
+    <div class="chipbar">
+      <span class="chip">γ {{ doc.preprocess_info.gamma_used }} ({{ doc.preprocess_info.gamma_mode }})</span>
+      <span class="chip">brightness {{ doc.preprocess_info.mean_brightness_before }} → {{ doc.preprocess_info.mean_brightness_after }}</span>
+      <span class="chip">skew {{ doc.preprocess_info.skew_angle }}°</span>
+      <span class="chip">{{ doc.preprocess_info.elapsed_ms }} ms</span>
+    </div>
+    <details class="steps-detail"><summary>Enhancement steps applied</summary>
+      <ol class="steps small">
+        {% for s in doc.preprocess_info.steps %}
+        <li><b>{{ s.name }}</b> — {{ s.detail }}</li>
+        {% endfor %}
+      </ol>
+    </details>
+    {% endif %}
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <h3>OCR engine</h3>
+      <div class="kv">
+        <span>Engine</span><b>{{ doc.ocr_engine|default:"—" }}</b>
+        <span>Language model</span><b class="upper">{{ doc.ocr_language|default:doc.language }}</b>
+        <span>Dominant script</span><b class="upper">{{ doc.detected_language|default:"—" }}</b>
+        <span>Mean word confidence</span><b>{{ doc.ocr_confidence_pct }}%</b>
+        <span>Pages</span><b>{{ doc.page_count }}{% if doc.page_count > doc.processed_page_count %} ({{ doc.processed_page_count }} processed){% endif %}</b>
+        <span>Size</span><b>{{ doc.file_size|filesizeformat }}</b>
+        <span>Metadata</span><b>{{ doc.state_name|default:"—" }} / {{ doc.district_name|default:"—" }}</b>
+        <span>Processed</span><b>{{ doc.processed_at|date:"d M Y, H:i:s"|default:"—" }}</b>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Pipeline log</h3>
+      <ul class="timeline">
+        {% for e in doc.processing_log %}
+        <li><b>{{ e.stage }}</b> <span class="muted small">{{ e.time }}</span>
+          <div class="muted small">
+            {% for k, v in e.items %}{% if k != 'stage' and k != 'time' %}<code>{{ k }}={{ v }}</code> {% endif %}{% endfor %}
+          </div>
+        </li>
+        {% empty %}<li class="muted">Not processed yet.</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+
+{% if record %}
+<section class="card">
+  <div class="card-head"><h3>Extracted fields <span class="pill">{{ record.fields.count }} fields · overall {{ record.overall_confidence_pct }}%</span></h3>
+    {% if record.status == 'PENDING' and role != 'VIEWER' %}
+    <a class="btn primary sm" href="{% url 'verify_record' record.pk %}">Open verification console →</a>{% endif %}
+  </div>
+  <table class="table">
+    <thead><tr><th>Field</th><th>Value</th><th>Confidence</th><th>Extraction method</th><th>Source</th><th></th></tr></thead>
+    <tbody>
+    {% for f in fields %}
+    <tr>
+      <td>{{ f.label }}</td>
+      <td>
+        {% if f.row and f.row.corrected_value %}
+          <span class="mono">{{ f.row.corrected_value }}</span>
+          <small class="muted strike">{{ f.row.value }}</small>
+        {% else %}
+          <span class="mono">{{ f.value|default:"—" }}</span>
+        {% endif %}
+      </td>
+      <td style="min-width:150px">
+        {% if f.row %}
+        <div class="confbar"><span style="width:{{ f.row.confidence_pct }}%" class="{{ f.row.confidence|conf_class }}"></span></div>
+        <small class="muted">{{ f.row.confidence_pct }}%</small>
+        {% else %}—{% endif %}
+      </td>
+      <td class="muted small">{% if f.row %}{{ f.row.method|default:"—" }}{% else %}—{% endif %}</td>
+      <td>{% if f.row %}<span class="badge src-{{ f.row.source }}">{{ f.row.get_source_display }}</span>{% endif %}</td>
+      <td>{% if f.row and f.row.needs_review %}<span class="badge warn">review</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if issues %}
+<section class="card">
+  <h3>Validation findings</h3>
+  <table class="table">
+    <thead><tr><th>Severity</th><th>Rule</th><th>Field</th><th>Message</th></tr></thead>
+    <tbody>
+      {% for i in issues %}
+      <tr>
+        <td><span class="badge {{ i.severity|status_class }}">{{ i.severity }}</span></td>
+        <td class="mono">{{ i.rule_code }}</td>
+        <td>{{ i.field_name|default:"—" }}</td>
+        <td>{{ i.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endif %}
+
+<section class="card">
+  <h3>Raw OCR text</h3>
+  <pre class="ocr-text">{% if doc.ocr_text %}{{ doc.ocr_text }}{% else %}— (not processed yet){% endif %}</pre>
+</section>
+
+{% if audits %}
+<section class="card">
+  <h3>Audit trail for this document</h3>
+  <table class="table">
+    <thead><tr><th>When</th><th>User</th><th>Action</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for a in audits %}
+    <tr><td class="muted">{{ a.created_at|date:"d M Y H:i:s" }}</td>
+        <td>{{ a.user_label }}</td><td><span class="badge info">{{ a.action }}</span></td>
+        <td>{{ a.detail }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,114 @@
+{% extends "records/base.html" %}
+{% load records_extras %}
+{% block title %}Verify Record #{{ record.pk }}{% endblock %}
+{% block heading %}Verification Console — Record #{{ record.pk }}{% endblock %}
+{% block subheading %}Compare the enhanced scan against the extracted fields. Each field shows how it was found, its confidence and whether it needs review.{% endblock %}
+
+{% block content %}
+<form method="post" class="verify-layout">
+  {% csrf_token %}
+  <div class="card preview-card">
+    <div class="card-head"><h3>Enhanced scan <span class="pill">γ-corrected · binarized · deskewed</span>
+      {% if doc.processed_page_count > 1 %}<span class="pill">{{ doc.processed_page_count }} pages</span>{% endif %}</h3></div>
+    {% if doc.processed_page_count > 1 %}
+    <p class="muted small">All {{ doc.processed_page_count }} processed pages feed this single record —
+      switch tabs to check each scan, then approve or reject once below.</p>
+    {% endif %}
+    {% if doc.page_count > doc.processed_page_count %}
+    <div class="alert warn"><svg><use href="#i-x"/></svg><div>
+      This file has <strong>{{ doc.page_count }} pages</strong> but only the first
+      <strong>{{ doc.processed_page_count }}</strong> were enhanced, OCR'd and used for
+      extraction (pipeline cap). Fields sourced only from later pages may be missing —
+      raise <code>OCR_MAX_PAGES</code> in settings and reprocess if this document needs them.
+    </div></div>
+    {% endif %}
+    <div class="preview sticky">
+      {% if doc.pages.all %}
+      {% if doc.processed_page_count > 1 %}
+      <div class="btngroup page-tabs">
+        {% for page in doc.pages.all %}
+        <button class="btn ghost sm page-tab{% if forloop.first %} active{% endif %}"
+                type="button" data-page="{{ page.page_number }}">Page {{ page.page_number }}</button>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% for page in doc.pages.all %}
+      <div class="page-block{% if doc.processed_page_count > 1 and not forloop.first %} hidden{% endif %}"
+           data-page="{{ page.page_number }}">
+        {% if doc.processed_page_count > 1 %}
+        <p class="muted small">Page {{ page.page_number }}/{{ doc.page_count }}
+          — {{ page.ocr_confidence_pct }}% confidence</p>
+        {% endif %}
+        <img src="{{ page.processed_image.url }}" alt="enhanced scan page {{ page.page_number }}">
+      </div>
+      {% endfor %}
+      {% elif doc.processed_image %}
+      <img src="{{ doc.processed_image.url }}" alt="enhanced scan">
+      {% elif doc.is_image %}
+      <img src="{{ doc.file.url }}" alt="original scan">
+      {% else %}
+      <iframe src="{{ doc.file.url }}" title="PDF"></iframe>
+      {% endif %}
+    </div>
+    <p class="muted small">Document:
+      <a href="{% url 'document_detail' doc.pk %}">#{{ doc.pk }} — {{ doc.filename }}</a>
+      · OCR {{ doc.ocr_confidence_pct }}% · engine {{ doc.ocr_engine }}</p>
+  </div>
+
+  <div class="stack">
+    {% if issues %}
+    <div class="card">
+      <h3>Open validation findings</h3>
+      {% for i in issues %}
+      <div class="alert {{ i.severity }}">
+        <svg><use href="#{% if i.severity == 'error' %}i-x{% else %}i-verify{% endif %}"/></svg>
+        <div><b>{{ i.rule_code }}</b>{{ i.field_name }} — {{ i.message }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h3>Extracted fields
+        <span class="pill">{% if record.overall_confidence_pct < 75 %}low confidence — review all{% else %}spot-check suggested{% endif %}</span>
+      </h3>
+      <div class="vgrid">
+        {% for f in fields %}
+        <div class="vfield {% if f.needs_review %}needs{% endif %}">
+          <label>{{ f.label }}{% if f.required %} <em class="req">*</em>{% endif %}</label>
+          <div class="vinput">
+            <input name="{{ f.key }}" value="{{ f.value }}"
+                   placeholder="{{ f.label }}"
+                   {% if f.type == 'number' %}inputmode="decimal"{% endif %}>
+            <div class="vmeta">
+              <div class="confbar"><span style="width:{{ f.confidence|pct }}%" class="{{ f.confidence|conf_class }}"></span></div>
+              <small class="muted">{{ f.confidence|pct }}% · <span class="src src-{{ f.source }}">{{ f.source }}</span>{% if f.method %} · <span title="{{ f.evidence }}">{{ f.method }}</span>{% endif %}</small>
+              {% if f.ocr_value and f.ocr_value != f.value|stringformat:"s" %}
+              <button class="chip-btn" type="button" data-copy="{{ f.ocr_value }}" title="Paste original OCR value">⟲ OCR: {{ f.ocr_value|truncatechars:18 }}</button>
+              {% elif f.ocr_value and f.needs_review %}
+              <button class="chip-btn" type="button" data-copy="{{ f.ocr_value }}" title="Paste original OCR value">⟲ {{ f.ocr_value|truncatechars:18 }}</button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <label style="margin-top:14px;display:block">Verification note</label>
+      <textarea name="note" rows="2" placeholder="Register no., remarks for the audit trail…">{{ record.review_note }}</textarea>
+
+      <div class="toolbar" style="margin-top:16px">
+        <button class="btn primary lg" name="action" value="verify" type="submit">
+          <svg class="ic"><use href="#i-check"/></svg> Approve &amp; verify
+        </button>
+        <button class="btn danger lg" name="action" value="reject" type="submit"
+                onclick="return confirm('Reject this record? It will not enter the verified register.')">
+          <svg class="ic"><use href="#i-x"/></svg> Reject
+        </button>
+        <span class="spacer"></span>
+        <small class="muted">Verified when all error-level findings are resolved.</small>
+      </div>
+    </div>
+  </div>
+</form>
+{% endblock %}

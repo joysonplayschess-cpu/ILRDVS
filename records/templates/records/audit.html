@@ -1,0 +1,39 @@
+{% extends "records/base.html" %}
+{% block title %}Audit Trail{% endblock %}
+{% block heading %}Audit Trail{% endblock %}
+{% block subheading %}Immutable log of every upload, pipeline run, edit, verification, rejection and API call{% endblock %}
+
+{% block content %}
+<section class="card">
+  <form class="filterbar" method="get">
+    <select name="action" onchange="this.form.submit()">
+      <option value="">All actions</option>
+      {% for a in actions %}<option value="{{ a }}" {% if action == a %}selected{% endif %}>{{ a }}</option>{% endfor %}
+    </select>
+    <button class="btn ghost" type="submit">Filter</button>
+  </form>
+  <table class="table">
+    <thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Object</th><th>Detail</th><th>IP</th></tr></thead>
+    <tbody>
+    {% for a in page.object_list %}
+    <tr>
+      <td class="muted nowrap">{{ a.created_at|date:"d M Y H:i:s" }}</td>
+      <td>{{ a.user_label }}</td>
+      <td><span class="badge info">{{ a.action }}</span></td>
+      <td class="muted mono">{{ a.object_type }}{% if a.object_id %}#{{ a.object_id }}{% endif %}</td>
+      <td>{{ a.detail }}</td>
+      <td class="muted mono">{{ a.ip_address|default:"—" }}</td>
+    </tr>
+    {% empty %}<tr><td colspan="6" class="muted">No audit entries yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if page.paginator.num_pages > 1 %}
+  <div class="pagination">
+    {% if page.has_previous %}<a class="btn ghost sm" href="?page={{ page.previous_page_number }}&action={{ action }}">← Prev</a>{% endif %}
+    <span class="muted small">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}<a class="btn ghost sm" href="?page={{ page.next_page_number }}&action={{ action }}">Next →</a>{% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
